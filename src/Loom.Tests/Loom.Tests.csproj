@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Loom.Tests</RootNamespace>
+    <AssemblyName>Loom.Tests</AssemblyName>
+    <UseWPF>false</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Loom.Core\Loom.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- env-adapters: the Electron helper is an embedded resource of Loom; tests copy the
+         source file next to the test assembly so the real-app.asar integration tests can
+         deploy it to a temporary data root. -->
+    <None Include="..\Loom\Assets\helper.mjs" Link="helper\helper.mjs" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

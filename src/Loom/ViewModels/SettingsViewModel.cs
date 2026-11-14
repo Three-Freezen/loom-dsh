@@ -1,0 +1,461 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using System.Windows.Input;
+using Loom.Core.Abstractions;
+using Loom.Core.Infrastructure;
+using Loom.Core.Models;
+using Loom.Core.Update;
+using Loom.Services;
+
+namespace Loom.ViewModels;
+
+/// <summary>View model for the settings window (6 sections, edits <see cref="LoomConfig"/>).</summary>
+public sealed class SettingsViewModel : ObservableObject
+{
+    private static readonly Regex TimePattern = new(@"^([01]\d|2[0-3]):[0-5]\d$", RegexOptions.Compiled);
+
+    private readonly ILoomService _loom;
+    private LoomConfig _original = new();
+
+    private string _theme = "system";
+    private bool _autostart;
+    private bool _autoSnapshotOnStartup;
+    private bool _fullSnapshotOnUpdate;
+    private bool _autoRestoreAfterRecovery;
+    private bool _notifications;
+    private bool _quietHoursEnabled;
+    private string _quietHoursStart = "23:00";
+    private string _quietHoursEnd = "08:00";
+    private string _keepSnapshotsText = "5";
+    private string _quotaGbText = "1";
+    private string _autoUpgradePolicy = "A";
+
+    private string _dataRootText = "";
+    private string _installDirText = "";
+    private string _profileDirText = "";
+    private string _appVersionText = "—";
+    private string _dshVersionText = "—";
+    private string _toolVersionText = LoomPaths.ToolVersion;
+    private string _snapshotSummaryText = "0 份 · 0 B";
+    private string _configPathText = "";
+    private string _logsPathText = "";
+    private string _errorText = "";
+    private string _saveText = UiStrings.SettingsSave;
+    private bool _isBusy;
+    private string _savedHint = "";
+
+    // 应用更新（GitHub Releases）
+    private bool _autoCheckUpdate = true;
+    private bool _deleteSetupAfterUpdate = true;
+    private UpdateState _updateState = UpdateState.Idle;
+    private bool _inAppUpdateSupported = true;
+    private string _updateStatusText = "尚未检查更新";
+    private string _updateVersionText = "—";
+    private string _updateErrorText = "";
+    private int _updateProgress;
+    private bool _updateBusy;
+
+    public SettingsViewModel(ILoomService loom)
+    {
+        _loom = loom;
+        SaveCommand = new AsyncRelayCommand(SaveAsync, () => !IsBusy);
+        CancelCommand = new RelayCommand(() => Cancelled?.Invoke(this, EventArgs.Empty));
+        OpenDataFolderCommand = new RelayCommand(() => ShellLauncher.OpenFolder(_loom.Paths.DataRoot));
+        OpenBackupFolderCommand = new RelayCommand(() => ShellLauncher.OpenFolder(_loom.Paths.SnapshotsDir));
+        OpenLogsFolderCommand = new RelayCommand(() => ShellLauncher.OpenFolder(_loom.Paths.LogsDir));
+        OpenInstallFolderCommand = new RelayCommand(() =>
+        {
+            var dir = _loom.GetStatus().Installation?.InstallDir;
+            if (!string.IsNullOrWhiteSpace(dir)) ShellLauncher.OpenFolder(dir);
+        });
+        RelocateCommand = new AsyncRelayCommand(RelocateAsync, () => !IsBusy);
+        CheckUpdateCommand = new AsyncRelayCommand(CheckUpdateAsync, () => !_updateBusy);
+        DownloadUpdateCommand = new AsyncRelayCommand(
+            DownloadUpdateAsync,
+            () => !_updateBusy && _updateState == UpdateState.Available);
+        ApplyUpdateCommand = new RelayCommand(
+            ApplyUpdate,
+            () => !_updateBusy && _updateState == UpdateState.Ready);
+        OpenReleasePageCommand = new RelayCommand(OpenReleasePage);
+        RefreshUpdateState();
+    }
+
+    public event EventHandler? Cancelled;
+    public event EventHandler? Saved;
+    public event EventHandler<string>? ThemePreviewRequested;
+
+    /// <summary>Raised after the silent installer has been launched: the host must shut down so Inno can replace files.</summary>
+    public event EventHandler? RestartRequested;
+
+    public ICommand SaveCommand { get; }
+    public ICommand CancelCommand { get; }
+    public ICommand OpenDataFolderCommand { get; }
+    public ICommand OpenBackupFolderCommand { get; }
+    public ICommand OpenLogsFolderCommand { get; }
+    public ICommand OpenInstallFolderCommand { get; }
+    public ICommand RelocateCommand { get; }
+    public ICommand CheckUpdateCommand { get; }
+    public ICommand DownloadUpdateCommand { get; }
+    public ICommand ApplyUpdateCommand { get; }
+    public ICommand OpenReleasePageCommand { get; }
+
+    /// <summary>保留份数下拉选项（字符串，便于直接与文本框/下拉绑定）。</summary>
+    public IReadOnlyList<string> KeepOptions { get; } = new[] { "3", "5", "10", "20" };
+
+    // ------------------------------------------------------------- editable
+    public bool ThemeSystem
+    {
+        get => _theme == "system";
+        set { if (value) SetTheme("system"); }
+    }
+
+    public bool ThemeDark
+    {
+        get => _theme == "dark";
+        set { if (value) SetTheme("dark"); }
+    }
+
+    public bool ThemeLight
+    {
+        get => _theme == "light";
+        set { if (value) SetTheme("light"); }
+    }
+
+    public bool Autostart { get => _autostart; set => Set(ref _autostart, value); }
+    public bool AutoSnapshotOnStartup { get => _autoSnapshotOnStartup; set => Set(ref _autoSnapshotOnStartup, value); }
+    public bool FullSnapshotOnUpdate { get => _fullSnapshotOnUpdate; set => Set(ref _fullSnapshotOnUpdate, value); }
+    public bool AutoRestoreAfterRecovery { get => _autoRestoreAfterRecovery; set => Set(ref _autoRestoreAfterRecovery, value); }
+    public bool Notifications { get => _notifications; set => Set(ref _notifications, value); }
+    public bool QuietHoursEnabled { get => _quietHoursEnabled; set => Set(ref _quietHoursEnabled, value); }
+    public string QuietHoursStart { get => _quietHoursStart; set => Set(ref _quietHoursStart, value); }
+    public string QuietHoursEnd { get => _quietHoursEnd; set => Set(ref _quietHoursEnd, value); }
+    public string KeepSnapshotsText { get => _keepSnapshotsText; set => Set(ref _keepSnapshotsText, value); }
+    public string QuotaGbText { get => _quotaGbText; set => Set(ref _quotaGbText, value); }
+
+    public bool PolicyAutoUpgrade
+    {
+        get => _autoUpgradePolicy == "A";
+        set { if (value) SetPolicy("A"); }
+    }
+
+    public bool PolicyNotifyOnly
+    {
+        get => _autoUpgradePolicy == "B";
+        set { if (value) SetPolicy("B"); }
+    }
+
+    public bool PolicyKeepOld
+    {
+        get => _autoUpgradePolicy == "C";
+        set { if (value) SetPolicy("C"); }
+    }
+
+    // ------------------------------------------------------------- update
+    public bool AutoCheckUpdate { get => _autoCheckUpdate; set => Set(ref _autoCheckUpdate, value); }
+    public bool DeleteSetupAfterUpdate { get => _deleteSetupAfterUpdate; set => Set(ref _deleteSetupAfterUpdate, value); }
+
+    public string UpdateStatusText { get => _updateStatusText; private set => Set(ref _updateStatusText, value); }
+    public string UpdateVersionText { get => _updateVersionText; private set => Set(ref _updateVersionText, value); }
+    public string UpdateErrorText { get => _updateErrorText; private set { Set(ref _updateErrorText, value); OnPropertyChanged(nameof(HasUpdateError)); } }
+    public bool HasUpdateError => UpdateErrorText.Length > 0;
+    public int UpdateProgress { get => _updateProgress; private set => Set(ref _updateProgress, value); }
+    public bool InAppUpdateSupported { get => _inAppUpdateSupported; private set => Set(ref _inAppUpdateSupported, value); }
+    public bool IsUpdateDownloading => _updateState == UpdateState.Downloading;
+    public bool ShowDownloadUpdate => _inAppUpdateSupported && _updateState == UpdateState.Available;
+    public bool ShowApplyUpdate => _updateState == UpdateState.Ready;
+    public bool ShowUpdateProgress => _updateState == UpdateState.Downloading;
+    public string UpdateActionText => _updateState == UpdateState.Checking ? "正在检查…" : "检查更新";
+
+    // ------------------------------------------------------------- read-only
+    public string DataRootText { get => _dataRootText; private set => Set(ref _dataRootText, value); }
+    public string InstallDirText { get => _installDirText; private set => Set(ref _installDirText, value); }
+    public string ProfileDirText { get => _profileDirText; private set => Set(ref _profileDirText, value); }
+    public string AppVersionText { get => _appVersionText; private set => Set(ref _appVersionText, value); }
+    public string DshVersionText { get => _dshVersionText; private set => Set(ref _dshVersionText, value); }
+    public string ToolVersionText { get => _toolVersionText; private set => Set(ref _toolVersionText, value); }
+    public string SnapshotSummaryText { get => _snapshotSummaryText; private set => Set(ref _snapshotSummaryText, value); }
+    public string ConfigPathText { get => _configPathText; private set => Set(ref _configPathText, value); }
+    public string LogsPathText { get => _logsPathText; private set => Set(ref _logsPathText, value); }
+
+    public string ErrorText { get => _errorText; private set { Set(ref _errorText, value); OnPropertyChanged(nameof(HasError)); } }
+    public bool HasError => ErrorText.Length > 0;
+    public string SaveText { get => _saveText; private set => Set(ref _saveText, value); }
+    public bool IsBusy { get => _isBusy; private set { Set(ref _isBusy, value); OnPropertyChanged(nameof(IsIdle)); } }
+    public bool IsIdle => !IsBusy;
+    public string SavedHint { get => _savedHint; private set { Set(ref _savedHint, value); OnPropertyChanged(nameof(HasSavedHint)); } }
+    public bool HasSavedHint => SavedHint.Length > 0;
+
+    public string ThemeSummary => UiStrings.ThemeLabel(_theme);
+
+    public string FrequencySummary => _loom.Config.AutoSnapshotOnStartup ? "启动后自动快照" : "仅手动快照";
+
+    public void Load(LoomConfig config, LoomStatus status)
+    {
+        _original = config;
+        _theme = ThemeManager.Normalize(config.Theme);
+        Autostart = config.Autostart;
+        AutoSnapshotOnStartup = config.AutoSnapshotOnStartup;
+        FullSnapshotOnUpdate = config.FullSnapshotOnUpdate;
+        AutoRestoreAfterRecovery = config.AutoRestoreAfterRecovery;
+        Notifications = config.Notifications;
+        QuietHoursEnabled = config.QuietHoursEnabled;
+        QuietHoursStart = config.QuietHoursStart;
+        QuietHoursEnd = config.QuietHoursEnd;
+        KeepSnapshotsText = config.KeepSnapshots.ToString(CultureInfo.InvariantCulture);
+        QuotaGbText = (config.MaxSnapshotBytes / (1024d * 1024d * 1024d)).ToString("0.##", CultureInfo.InvariantCulture);
+        _autoUpgradePolicy = string.IsNullOrWhiteSpace(config.AutoUpgradePolicy) ? "A" : config.AutoUpgradePolicy;
+        AutoCheckUpdate = config.AutoCheckUpdate;
+        DeleteSetupAfterUpdate = config.DeleteSetupAfterUpdate;
+
+        var installation = status.Installation;
+        InstallDirText = string.IsNullOrWhiteSpace(installation?.InstallDir) ? "未找到（可在 CLI 用 --install-dir 指定）" : installation!.InstallDir;
+        ProfileDirText = string.IsNullOrWhiteSpace(installation?.ProfileDir) ? "未找到" : installation!.ProfileDir;
+        AppVersionText = installation?.AppVersion ?? "unknown";
+        DshVersionText = installation?.DshVersion ?? "unknown";
+        DataRootText = _loom.Paths.DataRoot;
+        ConfigPathText = _loom.Paths.ConfigFile;
+        LogsPathText = _loom.Paths.LogsDir;
+        ToolVersionText = LoomPaths.ToolVersion;
+        SnapshotSummaryText = $"{status.SnapshotCount} 份 · {UiStrings.FormatBytes(status.SnapshotBytes)}";
+
+        OnPropertyChanged(nameof(ThemeSystem));
+        OnPropertyChanged(nameof(ThemeDark));
+        OnPropertyChanged(nameof(ThemeLight));
+        OnPropertyChanged(nameof(PolicyAutoUpgrade));
+        OnPropertyChanged(nameof(PolicyNotifyOnly));
+        OnPropertyChanged(nameof(PolicyKeepOld));
+        OnPropertyChanged(nameof(ThemeSummary));
+        ErrorText = "";
+        SavedHint = "";
+        RefreshUpdateState();
+    }
+
+    // ------------------------------------------------------------- update flow
+
+    private void RefreshUpdateState()
+    {
+        var updates = _loom.Updates;
+        _updateState = updates.State;
+        InAppUpdateSupported = updates.InAppUpdateSupported;
+        UpdateVersionText = string.IsNullOrWhiteSpace(updates.NewVersion) ? "—" : updates.NewVersion!;
+        UpdateProgress = updates.ProgressPercent;
+        UpdateErrorText = _updateState == UpdateState.Failed ? updates.ErrorText ?? "" : "";
+        UpdateStatusText = _updateState switch
+        {
+            UpdateState.Idle => _inAppUpdateSupported
+                ? "尚未检查更新"
+                : "当前为免安装/开发版：可检查版本，但需手动下载安装包。",
+            UpdateState.Checking => "正在检查更新…",
+            UpdateState.UpToDate => updates.MessageText ?? "已是最新版本。",
+            UpdateState.Available => $"发现新版本 {updates.NewVersion}，可下载安装。",
+            UpdateState.Downloading => $"正在下载安装包… {updates.ProgressPercent}%",
+            UpdateState.Ready => _inAppUpdateSupported
+                ? "安装包已下载，点击“重启并更新”静默安装。"
+                : "安装包已下载；当前为免安装版，请手动运行下载的安装包。",
+            UpdateState.Failed => "更新失败：" + (updates.ErrorText ?? "未知错误"),
+            _ => "当前为免安装/开发版，不支持应用内更新。",
+        };
+
+        OnPropertyChanged(nameof(IsUpdateDownloading));
+        OnPropertyChanged(nameof(ShowDownloadUpdate));
+        OnPropertyChanged(nameof(ShowApplyUpdate));
+        OnPropertyChanged(nameof(ShowUpdateProgress));
+        OnPropertyChanged(nameof(UpdateActionText));
+        (CheckUpdateCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (DownloadUpdateCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (ApplyUpdateCommand as RelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    private async Task CheckUpdateAsync()
+    {
+        _updateBusy = true;
+        RefreshUpdateState();
+        try
+        {
+            await _loom.Updates.CheckAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _updateBusy = false;
+            RefreshUpdateState();
+        }
+    }
+
+    private async Task DownloadUpdateAsync()
+    {
+        if (!_loom.Updates.InAppUpdateSupported)
+        {
+            ErrorText = "当前为免安装/开发版，请到 GitHub Releases 手动下载安装包。";
+            return;
+        }
+
+        _updateBusy = true;
+        _loom.Updates.StateChanged += OnUpdateStateChanged;
+        try
+        {
+            await _loom.Updates.DownloadAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _loom.Updates.StateChanged -= OnUpdateStateChanged;
+            _updateBusy = false;
+            RefreshUpdateState();
+        }
+    }
+
+    private void OnUpdateStateChanged()
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess()) RefreshUpdateState();
+        else dispatcher.BeginInvoke(new Action(RefreshUpdateState));
+    }
+
+    private void ApplyUpdate()
+    {
+        try
+        {
+            _loom.Updates.ApplyAndRestart();
+            RestartRequested?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception exception)
+        {
+            ErrorText = "启动安装程序失败：" + exception.Message;
+        }
+    }
+
+    private void OpenReleasePage() => ShellLauncher.OpenUrl(_loom.Updates.ReleaseUrl);
+
+    private void SetTheme(string theme)
+    {
+        if (_theme == theme) return;
+        _theme = theme;
+        OnPropertyChanged(nameof(ThemeSystem));
+        OnPropertyChanged(nameof(ThemeDark));
+        OnPropertyChanged(nameof(ThemeLight));
+        OnPropertyChanged(nameof(ThemeSummary));
+        ThemePreviewRequested?.Invoke(this, theme);
+    }
+
+    private void SetPolicy(string policy)
+    {
+        if (_autoUpgradePolicy == policy) return;
+        _autoUpgradePolicy = policy;
+        OnPropertyChanged(nameof(PolicyAutoUpgrade));
+        OnPropertyChanged(nameof(PolicyNotifyOnly));
+        OnPropertyChanged(nameof(PolicyKeepOld));
+    }
+
+    private async Task RelocateAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            var installation = await _loom.LocateAsync().ConfigureAwait(true);
+            if (installation is null || !installation.Found)
+            {
+                ErrorText = "重新定位失败：未找到 DeepSeek Harness。";
+                return;
+            }
+
+            InstallDirText = installation.InstallDir;
+            ProfileDirText = installation.ProfileDir;
+            AppVersionText = installation.AppVersion;
+            DshVersionText = installation.DshVersion;
+            ErrorText = "";
+        }
+        catch (Exception exception)
+        {
+            ErrorText = "重新定位失败：" + exception.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        SaveText = UiStrings.SettingsSaving;
+        IsBusy = true;
+        ErrorText = "";
+        SavedHint = "";
+        try
+        {
+            if (!int.TryParse(KeepSnapshotsText.Trim(), out var keep) || keep < 1 || keep > 50)
+            {
+                ErrorText = "保留份数需为 1–50 的整数。";
+                return;
+            }
+
+            if (!double.TryParse(QuotaGbText.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var quotaGb)
+                || quotaGb < 0.1 || quotaGb > 100)
+            {
+                ErrorText = "快照配额需为 0.1–100 GB 之间的数字。";
+                return;
+            }
+
+            if (!TimePattern.IsMatch(QuietHoursStart.Trim()) || !TimePattern.IsMatch(QuietHoursEnd.Trim()))
+            {
+                ErrorText = "静默时段请使用 HH:mm 格式（例如 23:00）。";
+                return;
+            }
+
+            var updated = new LoomConfig
+            {
+                SchemaVersion = _original.SchemaVersion,
+                InstallDir = _original.InstallDir,
+                DshHome = _original.DshHome,
+                ProfileDir = _original.ProfileDir,
+                DataRoot = _original.DataRoot,
+                AutoUpgradePolicy = _autoUpgradePolicy,
+                AllowMajorUpgrade = _original.AllowMajorUpgrade,
+                KeepSnapshots = keep,
+                MaxSnapshotBytes = (long)(quotaGb * 1024 * 1024 * 1024),
+                MaxArchiveBytes = _original.MaxArchiveBytes,
+                FullSnapshotOnUpdate = FullSnapshotOnUpdate,
+                AutoSnapshotOnStartup = AutoSnapshotOnStartup,
+                AutoRestoreAfterRecovery = AutoRestoreAfterRecovery,
+                Notifications = Notifications,
+                QuietHoursStart = QuietHoursStart.Trim(),
+                QuietHoursEnd = QuietHoursEnd.Trim(),
+                QuietHoursEnabled = QuietHoursEnabled,
+                Autostart = Autostart,
+                LogLevel = _original.LogLevel,
+                Theme = _theme,
+                AutoCheckUpdate = AutoCheckUpdate,
+                DeleteSetupAfterUpdate = DeleteSetupAfterUpdate,
+                LastUpdateCheckUtc = _original.LastUpdateCheckUtc,
+                FirstRunCompleted = _original.FirstRunCompleted,
+                HealthCheckSeconds = _original.HealthCheckSeconds,
+                StartupSnapshotDelaySeconds = _original.StartupSnapshotDelaySeconds,
+                ProfileChangeDebounceSeconds = _original.ProfileChangeDebounceSeconds,
+                OperationTimeoutSeconds = _original.OperationTimeoutSeconds,
+            };
+
+            await _loom.SaveConfigAsync(updated).ConfigureAwait(true);
+            var autostartChanged = updated.Autostart != _original.Autostart;
+            if (autostartChanged)
+            {
+                await _loom.SetAutostartAsync(updated.Autostart).ConfigureAwait(true);
+            }
+
+            _original = updated;
+            ThemeManager.Apply(updated.Theme);
+            SnapshotSummaryText = $"{_loom.GetStatus().SnapshotCount} 份 · {UiStrings.FormatBytes(_loom.GetStatus().SnapshotBytes)}";
+            SavedHint = UiStrings.SettingsSaved;
+            Saved?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception exception)
+        {
+            ErrorText = "保存失败：" + exception.Message;
+        }
+        finally
+        {
+            SaveText = UiStrings.SettingsSave;
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>Reverts the live theme preview after the user cancels.</summary>
+    public void RevertThemePreview() => ThemeManager.Apply(_original.Theme);
+}

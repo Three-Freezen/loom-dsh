@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Loom.Core/Loom.Core.csproj" />
+  <Project Path="Loom.TestRunner/Loom.TestRunner.csproj" />
+  <Project Path="Loom.Tests/Loom.Tests.csproj" />
+  <Project Path="Loom/Loom.csproj" />
+</Solution>

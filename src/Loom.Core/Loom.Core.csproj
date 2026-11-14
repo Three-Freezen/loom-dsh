@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Loom.Core</RootNamespace>
+    <AssemblyName>Loom.Core</AssemblyName>
+    <Description>Loom for DSH core: snapshot / compatibility check / file-level restore / reporting.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Unit tests exercise the update feed/state machine (internal seams: tag parsing, asset URL). -->
+    <InternalsVisibleTo Include="Loom.Tests" />
+  </ItemGroup>
+</Project>

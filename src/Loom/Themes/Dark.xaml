@@ -1,0 +1,80 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- LOOM dark tokens · 对齐 DSH 0.2.2-rc.1 app.asar 实测值（docs/命名与设计说明.md 第三节） -->
+
+    <!-- 基础层 -->
+    <SolidColorBrush x:Key="BgBrush" Color="#151517" />
+    <SolidColorBrush x:Key="L1Brush" Color="#232324" />
+    <SolidColorBrush x:Key="L2Brush" Color="#2c2c2e" />
+    <SolidColorBrush x:Key="L3Brush" Color="#353638" />
+    <SolidColorBrush x:Key="SidebarBrush" Color="#1b1b1c" />
+
+    <!-- 文字 -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#f9fafb" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#cfd3d6" />
+    <SolidColorBrush x:Key="TextTertiaryBrush" Color="#adb2b8" />
+    <SolidColorBrush x:Key="TextQuaternaryBrush" Color="#81858c" />
+
+    <!-- 状态 -->
+    <SolidColorBrush x:Key="AccentBrush" Color="#7aaaff" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#2b7aaaff" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#4ed17e" />
+    <SolidColorBrush x:Key="SuccessSoftBrush" Color="#224ed17e" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#f59e0b" />
+    <SolidColorBrush x:Key="WarningSoftBrush" Color="#22f59e0b" />
+    <SolidColorBrush x:Key="DangerBrush" Color="#f25a5a" />
+    <SolidColorBrush x:Key="DangerSoftBrush" Color="#22f25a5a" />
+
+    <!-- 描边 / 交互 -->
+    <SolidColorBrush x:Key="BorderBrush" Color="#14ffffff" />
+    <SolidColorBrush x:Key="BorderStrongBrush" Color="#26ffffff" />
+    <SolidColorBrush x:Key="HoverBrush" Color="#0dffffff" />
+    <SolidColorBrush x:Key="PressedBrush" Color="#1affffff" />
+    <SolidColorBrush x:Key="InputBgBrush" Color="#2c2c2e" />
+    <SolidColorBrush x:Key="SelectedNavBrush" Color="#353638" />
+
+    <!-- 主/次按钮（深色：白底深字） -->
+    <SolidColorBrush x:Key="ButtonPrimaryBgBrush" Color="#f9fafb" />
+    <SolidColorBrush x:Key="ButtonPrimaryTextBrush" Color="#151517" />
+    <SolidColorBrush x:Key="ButtonPrimaryHoverBrush" Color="#ffffff" />
+    <SolidColorBrush x:Key="ButtonSecondaryBgBrush" Color="#2c2c2e" />
+    <SolidColorBrush x:Key="ButtonSecondaryTextBrush" Color="#f9fafb" />
+    <SolidColorBrush x:Key="ButtonSecondaryHoverBrush" Color="#353638" />
+
+    <!-- Toast / 提示 -->
+    <SolidColorBrush x:Key="ToastBrush" Color="#43454a" />
+    <SolidColorBrush x:Key="ToastTextBrush" Color="#ffffff" />
+    <SolidColorBrush x:Key="TooltipBgBrush" Color="#353638" />
+    <SolidColorBrush x:Key="TooltipTextBrush" Color="#f9fafb" />
+
+    <!-- 品牌 / 图标（深色主题 = 深底浅字形，与 loom-check-dark.ico 同一几何/配色） -->
+    <LinearGradientBrush x:Key="LogoTileGradientBrush" StartPoint="0.8536,0.1464" EndPoint="0.1464,0.8536">
+        <GradientStop Color="#2e3034" Offset="0" />
+        <GradientStop Color="#232427" Offset="0.55" />
+        <GradientStop Color="#1a1b1e" Offset="1" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="LogoTileBrush" Color="#232427" />
+    <SolidColorBrush x:Key="LogoGlyphBrush" Color="#f9fafb" />
+    <SolidColorBrush x:Key="LogoLineBrush" Color="#4176e6" />
+    <SolidColorBrush x:Key="LogoTileBorderBrush" Color="#14ffffff" />
+
+    <!-- 托盘右键菜单（WPF 自绘，跟随应用主题） -->
+    <SolidColorBrush x:Key="MenuSurfaceBrush" Color="#242426" />
+    <SolidColorBrush x:Key="MenuBorderBrush" Color="#26ffffff" />
+    <SolidColorBrush x:Key="MenuHoverBrush" Color="#2f3033" />
+    <SolidColorBrush x:Key="MenuPressedBrush" Color="#383a3d" />
+    <SolidColorBrush x:Key="MenuTextBrush" Color="#f9fafb" />
+    <SolidColorBrush x:Key="MenuTextDisabledBrush" Color="#6b6f76" />
+    <SolidColorBrush x:Key="MenuIconBrush" Color="#adb2b8" />
+    <SolidColorBrush x:Key="MenuSeparatorBrush" Color="#1affffff" />
+    <SolidColorBrush x:Key="MenuDangerBrush" Color="#f08a8a" />
+
+    <!-- 滚动条 -->
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="#26ffffff" />
+    <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#40ffffff" />
+    <SolidColorBrush x:Key="ScrollTrackBrush" Color="#00000000" />
+
+    <!-- 阴影 -->
+    <Color x:Key="ShadowColor">#000000</Color>
+</ResourceDictionary>

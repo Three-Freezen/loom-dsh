@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Version>0.1.0</Version>
+    <Company>Loom for DSH</Company>
+    <Product>Loom for DSH</Product>
+    <Copyright>Loom for DSH</Copyright>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;NU1900;CA1416</NoWarn>
+    <!-- The DSH sandbox blocks the Roslyn compiler server's named pipe; in-process compilation is stable. -->
+    <UseSharedCompilation>false</UseSharedCompilation>
+    <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+  </PropertyGroup>
+</Project>
