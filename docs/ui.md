@@ -279,7 +279,7 @@ InvalidOperationException: A TwoWay or OneWayToSource binding cannot work on the
 **验证**：ui render --data-root <工作区内目录> → 退出码 **0**、**10 张** PNG（含 settings-update 深浅各一张，已逐张 read_image 核对）；
 ui settings → 主窗口 Loom 设置 可见（MainWindowHandle != 0）；全量单测 **175/175 PASS**。
 
-## 11. 0.2.0（本地，未发布）界面相关变更
+## 11. 0.2.0 界面相关变更（2026-11-14 已发布）
 
 - **`ui render` 失败返回非 0**：启动期初始界面失败会记 `RequestedExitCode = 1`；`render` 模式在 `finally` 里用
   `Shutdown(exitCode)` 显式带退出码（失败为 1）。`Program.RunTray` 在 `Application.Run()` 返回 0 时用

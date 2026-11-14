@@ -1,7 +1,7 @@
 # Loom for DSH · DSH 插件更新守护
 
-> 状态：**0.2.0 本地完成、尚未发布**（二期：策略 A 自动升级 / 包级恢复 / 离线完整回滚 + 一批 P2 健壮性修复；自动升级与包级恢复默认关闭、标实验性）；0.1.1 为**当前已发布版本**（修复 0.1.0-beta 设置窗口打不开）；范围 A + 托盘右键菜单/图标一致性 + Inno Setup 安装包 + 安装目录数据根与旧数据迁移 + 应用内更新（GitHub Releases）均已完成；第三轮独立 QA 通过（`docs/验收报告.md` §13，无 P0/P1，4 项真机 smoke 见下）；收口轮次独立复审 **P1=0**，全量单测 **403/403**
-> 更新：2026-11-14 · GitHub 公开仓库（MIT）：<https://github.com/Three-Freezen/loom-dsh> · 最新已发布版 **0.1.1**（0.2.0 未发布，发布包与校验和待发布时生成）
+> 状态：**0.2.0 已发布**（Latest）（二期：策略 A 自动升级 / 包级恢复 / 离线完整回滚 + 一批 P2 健壮性修复；自动升级与包级恢复默认关闭、标实验性）；0.1.1 为上一个已发布版本（修复 0.1.0-beta 设置窗口打不开）；范围 A + 托盘右键菜单/图标一致性 + Inno Setup 安装包 + 安装目录数据根与旧数据迁移 + 应用内更新（GitHub Releases）均已完成；第三轮独立 QA 通过（`docs/验收报告.md` §13，无 P0/P1，4 项真机 smoke 见下）；收口轮次独立复审 **P1=0**，全量单测 **403/403**
+> 更新：2026-11-14 · GitHub 公开仓库（MIT）：<https://github.com/Three-Freezen/loom-dsh> · 最新已发布版 **0.2.0**
 
 Loom（织机）是一个 Windows 托盘小工具 + 同名 CLI，用于在 DeepSeek Harness 桌面版每次自动更新后，自动保护/恢复已安装的插件（profile bundles、配置与兼容性状态），并在存在版本兼容问题时给出提示与处置（默认策略 A：升级到兼容版本；自动执行需显式开启，默认关闭）。
 
@@ -159,7 +159,7 @@ powershell -ExecutionPolicy Bypass -File scripts\pack-installer.ps1 -SkipPublish
 4. ✅ 验证：第三轮独立 QA **通过**（报告 §13）：单元测试 **175/175**（QA 时 143，新增 32 个应用内更新用例）；沙箱验收脚本 **9/9**；UI 深/浅预览 **10 张** + 图标对照；安装/升级/卸载/迁移 e2e（SandboxTest）**21/21 PASS**；真实 profile/安装目录只读 SHA256 零漂移；正式安装包/通知区右键/静默升级重启/ACL 生效 4 项标 ENV-LIMITED，需真机 smoke（本节为 0.1.1 轮次口径；0.2.0 收口为 **403/403** 用例与 **12 张**预览，见文首与 #7）
 5. ✅ 应用内更新（本轮新增）：GitHub Releases 检查（24h 节流）/ 下载（`.part` 原子）/ 静默升级 / 升级后清理；设置页更新卡片、托盘菜单「检查应用更新」、启动自动检查通知、CLI `update`；离线自测钩子与 32 个单元测试
 6. ✅ **0.1.1 修复**（已发布）：设置窗口打不开 ——「应用更新」卡片的 `ProgressBar.Value` 默认 TwoWay 绑定只读属性 `UpdateProgress`，WPF 在窗口 `Show()` 前抛 `InvalidOperationException` 并被 dispatcher 吞掉。改为 `Mode=OneWay`；同时让界面创建失败时写日志并弹提示、`ui render` 在 `finally` 无条件退出、`TryLogException` 复用服务 logger（修掉两个 FileLogger 互相覆盖日志的缺陷），并新增 `settings-update-*` 预览防回归。详见 [ui.md §10](docs/ui.md)
-7. ✅ 二期（0.2.0 本地，未发布；自动升级与包级恢复默认关闭、标实验性）：
+7. ✅ 二期（0.2.0 已发布；自动升级与包级恢复默认关闭、标实验性）：
    - 策略 A 自动升级：`UpgradePlanner` 纯函数决策（前置闸门 → 候选筛选 → 稳定版优先排序，绝不自动授予风险豁免）+ `UpgradeService`（写前备份 `restore-backup\<opId>\` → `plugin add <pkg>@<ver> --save-exact` → 回读校验 → 失败只回滚本次）；自动升级只在 `autoUpgradeEnabled=true`、策略 A、DSH 完全退出时由 Tick 串行执行（每次最多 3 个）
    - 包级恢复（实验性）：`recovery plan|apply` 写前备份两个核心文件 → 写回 `package.json`/`pnpm-lock.yaml` → `install --offline --frozen-lockfile` → 校验；`packageRestoreEnabled` 默认关，需开关 + DSH 完全退出，默认不联网
    - 离线完整回滚：`recovery rollback <opId>` 按 `restore-backup\<opId>\package-restore.json` 只回滚该 op（恢复文件 + 离线重装 + 再次校验）；回滚点保留 `keepRollbackBackups` 份（默认 5）
@@ -170,16 +170,16 @@ powershell -ExecutionPolicy Bypass -File scripts\pack-installer.ps1 -SkipPublish
 
 ## 发布包
 
-### 已发布：0.1.1（GitHub Release）
+### 历史发布：0.1.1（GitHub Release）
 
 | 产物 | 大小 | SHA256 |
 |---|---|---|
 | `dist\loom-dsh.exe` | 173,643,760 B | `c35405524e18c8476a43a16e2def1052741a1c5320380917c349ecd2a7df2f9c` |
 | `dist\loom-dsh-Setup.exe` | 51,862,695 B | `caa1b921f3abbe3d815d6bbf3b042fd39cf33872f0b4ada4c0803c62ed73e7aa` |
 
-### 本地构建（0.2.0，尚未发布、未推送任何远程）
+### 已发布：0.2.0（GitHub Release）
 
-`scripts\publish.ps1` 已在本地产出 0.2.0 载荷（`dist\SHA256SUMS.txt` 与 `dist\发布说明.txt` 同步更新）：
+本次发布资产（已上传到 GitHub Release）：
 
 | 产物 | 大小 | SHA256 |
 |---|---|---|
@@ -189,8 +189,7 @@ powershell -ExecutionPolicy Bypass -File scripts\pack-installer.ps1 -SkipPublish
 - `dist\SHA256SUMS.txt`（两行）、`dist\发布说明.txt`（使用/安装/数据目录/迁移/范围说明）
 - 构建/发布脚本：`scripts\build.ps1`、`scripts\test.ps1`、`scripts\publish.ps1`、`scripts\pack-installer.ps1`；验收脚本：`scripts\acceptance-sandbox.ps1`
 
-> 0.2.0 **尚未发布到 GitHub**：上述哈希是本机构建产物，仓库没有 0.2.0 的 Release/远程标签；
-> 将来发布时按 [docs/发布说明-v0.2.0.md](docs/发布说明-v0.2.0.md) 的占位补齐校验和并重新 `scripts\publish.ps1` 确认一致。
+> Release：<https://github.com/Three-Freezen/loom-dsh/releases/tag/v0.2.0>（tag `v0.2.0`）；正文见 [docs/发布说明-v0.2.0.md](docs/发布说明-v0.2.0.md)。
 
 ## 已知限制
 
