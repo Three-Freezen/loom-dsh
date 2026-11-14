@@ -43,7 +43,7 @@ public static class DshDefaults
 /// <summary>Tool data layout (all under %LOCALAPPDATA%\Loom by default).</summary>
 public sealed class LoomPaths
 {
-    public const string ToolVersion = "0.1.0";
+    public const string ToolVersion = "0.1.1";
 
     public LoomPaths(string dataRoot)
     {

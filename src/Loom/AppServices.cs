@@ -82,6 +82,18 @@ public sealed class AppServices : IDisposable
 
     public void TryLogException(Exception exception, string message)
     {
+        // Reuse the service logger when possible: a second FileLogger opened on the same file appends
+        // from a stale offset and overwrites lines written by the running logger.
+        try
+        {
+            _loom.LogException(exception, message);
+            return;
+        }
+        catch
+        {
+            // fall through to the standalone logger
+        }
+
         try
         {
             _loom.Paths.EnsureDirectories();

@@ -1,7 +1,7 @@
 ; Loom for DSH 安装脚本（Inno Setup 6）
 ; 参考: DeskOrder tools\DeskOrder.iss（同一套免管理员 / 用户目录 / 固定安装包名 / 静默升级模式）
 ;
-; 编译:   ISCC.exe /DAppVersion=0.1.0 installer\loom-dsh.iss
+; 编译:   ISCC.exe /DAppVersion=0.1.1 installer\loom-dsh.iss
 ; 产物:   dist\loom-dsh-Setup.exe（文件名固定不带版本号 → releases/latest/download 与
 ;         未来应用内更新的直链永远拿到最新版）
 ; 交互安装: 免管理员，默认装到 {userpf}\Loom（%LOCALAPPDATA%\Programs\Loom），路径可改；
@@ -14,7 +14,7 @@
 #define MyAppShortName "Loom"
 #define MyAppPublisher "Loom for DSH"
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 
 ; ── 打包/沙箱测试钩子（正常打包不传这些 /D 参数）──────────────────────────────

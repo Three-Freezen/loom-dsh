@@ -157,12 +157,13 @@ cd D:\BS\Loom-DSH\src
 dotnet build Loom\Loom.csproj -p:UseSharedCompilation=false
 $exe='D:\BS\Loom-DSH\src\Loom\bin\Debug\net10.0-windows\win-x64\loom-dsh.exe'
 cmd /c "`"$exe`" ui render --data-root D:\BS\Loom-DSH\.tmp-ui-tray > out.txt 2> err.txt"   # 退出码 0
-Get-ChildItem D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview   # 8 张 PNG
+Get-ChildItem D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview   # 10 张 PNG
 ```
 
 注意：
 - 若有托盘实例在运行，`ui render` 会经命令队列转给旧托盘执行且**不会退出**；测试前先 `Get-Process loom-dsh` 并结束旧进程。用 `cmd /c` 包一层才能拿到 WinExe 的退出码（PowerShell 的 `&` 对 GUI 子系统进程不等待）。
-- 本轮 8 张产物位于 `D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview\`（构建产物目录不入库），已按 `read_image` 逐张核对 token 颜色/层级/菜单样式/LogoMark 深底浅字形，并复制到 `design/ui/impl-preview/`。
+- 本轮 10 张产物位于 `D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview\`（构建产物目录不入库），已按 `read_image` 逐张核对 token 颜色/层级/菜单样式/LogoMark 深底浅字形，并复制到 `design/ui/impl-preview/`。
+  - 0.1.1 起新增 `settings-update-{dark,light}.png`：渲染「更新与兼容」页（应用更新卡片所在页），专门防住“只读属性被 TwoWay 绑定”这类编译期发现不了、运行期才炸的缺陷。
 - 图标对照图由 `spike/tray-ui-harness`（gitignored）生成：`design/ui/impl-preview/icon-parity.png`（深/浅两行：LogoMark 96/48 + 托盘 ico 64/32/16 同屏对比，几何/配色一致）。
 
 ---
@@ -240,8 +241,34 @@ Get-ChildItem D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview   # 8 张 PNG
 
 - `dotnet build src\Loom\Loom.csproj -p:UseSharedCompilation=false`：**0 error**（2 个 WFO0003 DPI manifest 警告，按约定忽略）。
 - 测试：`Loom.TestRunner` 反射 runner 全绿 **175/175 PASS**（当前仓内总数；含应用内更新 32 例，0 fail）。
-- `loom-dsh.exe ui render --data-root D:\BS\Loom-DSH\.tmp-ui-tray`：**退出码 0**，生成 8 张 PNG（popup/settings/wizard/tray-menu × dark/light），无残留托盘进程；产物已核对并复制到 `design/ui/impl-preview/`。
+- `loom-dsh.exe ui render --data-root D:\BS\Loom-DSH\.tmp-ui-tray`：**退出码 0**，生成 **10 张** PNG（popup / settings / settings-update / wizard / tray-menu × dark/light），无残留托盘进程；产物已核对并复制到 `design/ui/impl-preview/`。
 - 行为验证：`spike/tray-ui-harness` **32/32 checks PASS，退出码 0**（菜单先关后执行、可重复打开、busy 禁用、弹层失焦保护、菜单→状态面板端到端、前台锁/capture 兜底决策、图标对照图生成）。
 - 复审补丁（前台锁加固）：`TrayMenuWindow` 增加 `SetForegroundWindow` 尝试 + Diagnostics/WARN 落日志、未激活时 mouse-capture 外部点击关闭兜底、`ShouldDismissOnMouseCaptureLoss`/`IsPointInsideMenu` 决策函数；`dotnet build src\Loom\Loom.csproj -p:UseSharedCompilation=false` 仍 0 error，harness 由 20 → 32 checks 全 PASS。
 - 图标一致性：`design/ui/impl-preview/icon-parity.png`（LogoMark 96/48 与托盘 ico 64/32/16 深/浅对照）。
 - 未触碰真实 profile 与 `D:\DeepSeek`（只读探测由核心工作流负责）；未联网；未新增 NuGet 包；未修改 `Program.cs` / `AppServices.cs` / `LoomServiceFactory.cs` / `src/Loom.Core/**` / `installer/**`。
+
+## 10. 0.1.1 修复记录：设置窗口打不开（TwoWay 绑定只读属性）
+
+**症状**：从托盘菜单点「设置」（或 loom-dsh ui settings）无任何反应；进程仍在、日志里没有新行；ui render 只产出 popup 一张图后卡住不退出。
+
+**根因**：0.1.1 之前的「应用更新」卡片里写的是
+
+```xml
+<ProgressBar Value="{Binding UpdateProgress}" ... />   <!-- 错 -->
+```
+
+RangeBase.Value 的默认绑定模式是 **TwoWay**，而 SettingsViewModel.UpdateProgress 只有 private set。WPF 在创建 SettingsView 时抛
+InvalidOperationException: A TwoWay or OneWayToSource binding cannot work on the read-only property 'UpdateProgress'：
+- 异常出现在 SettingsView 初始化阶段（窗口尚未 Show），被 DispatcherUnhandledException 吞掉（e.Handled = true）→ 窗口静默不出现；
+- ui render 里异常发生在 ShowTarget() 内 → Dispatcher.BeginInvoke(Shutdown) 那行永远执行不到 → 进程留在托盘里“假死”。
+
+**修复**：
+1. Value="{Binding UpdateProgress, Mode=OneWay}"（只读展示型属性统一显式 Mode=OneWay）。
+2. App.OnStartup：初始化界面包 	ry/catch；ender 模式在 inally 里无条件 Shutdown()，渲染失败也会退出并返回非 0。
+3. TrayHost.ShowSettingsCore/ShowWizardCore/ShowReportCore：窗口创建失败 → 清理半初始化状态 + 写日志 + 弹一次可读的错误提示，不再静默。
+4. AppServices.TryLogException 改用服务自身的 logger（LoomService.LogException）。此前它另开一个 FileLogger 追加同一文件，
+   两个句柄各自维护偏移会互相覆盖 —— 本次真正的那行 ERROR 就被后续 INFO 覆盖成了半行，属于“有日志等于没日志”。
+5. ui render 增加 settings-update-{dark,light}.png（渲染「更新与兼容」页），把这类只在运行时爆炸的绑定问题纳入回归验证。
+
+**验证**：ui render --data-root <工作区内目录> → 退出码 **0**、**10 张** PNG（含 settings-update 深浅各一张，已逐张 ead_image 核对）；
+ui settings → 主窗口 Loom 设置 可见（MainWindowHandle != 0）；全量单测 **175/175 PASS**。

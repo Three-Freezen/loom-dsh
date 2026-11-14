@@ -3,6 +3,7 @@ using System.Windows.Threading;
 using Loom.Core.Abstractions;
 using Loom.Core.Ipc;
 using Application = System.Windows.Application;
+using MessageBox = System.Windows.MessageBox;
 
 namespace Loom;
 
@@ -64,10 +65,30 @@ public partial class App : Application
 
         if (!string.IsNullOrEmpty(_initialUi))
         {
-            ShowTarget(_initialUi);
-            if (string.Equals(_initialUi, "render", StringComparison.OrdinalIgnoreCase))
+            var isRender = string.Equals(_initialUi, "render", StringComparison.OrdinalIgnoreCase);
+            try
             {
-                Dispatcher.BeginInvoke(new Action(Shutdown));
+                ShowTarget(_initialUi);
+            }
+            catch (Exception exception)
+            {
+                // A failing initial window must not keep a headless render/UI run alive forever.
+                _services.TryLogException(exception, "初始界面打开失败（" + _initialUi + "）");
+                if (!isRender)
+                {
+                    MessageBox.Show(
+                        "界面打开失败：\n" + exception.Message,
+                        "Loom for DSH",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+            }
+            finally
+            {
+                if (isRender)
+                {
+                    Dispatcher.BeginInvoke(new Action(Shutdown));
+                }
             }
         }
         else if (!_services.Loom.Config.FirstRunCompleted)

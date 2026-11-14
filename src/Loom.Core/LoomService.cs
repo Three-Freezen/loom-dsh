@@ -101,6 +101,13 @@ public sealed class LoomService : ILoomService, IDisposable
     public UpdateService Updates { get; }
     public bool IsBusy => _busy;
 
+    /// <summary>
+    /// Writes an exception to the service's own logger. The UI host must use this instead of opening a
+    /// second <see cref="FileLogger"/> on the same file: two append handles at stale offsets would
+    /// overwrite each other's lines (diagnostics for exactly the interesting failures got clobbered).
+    /// </summary>
+    public void LogException(Exception exception, string message) => _logger.LogException(exception, message);
+
     public event EventHandler<LoomStatus>? StatusChanged;
     public event EventHandler<LoomNotification>? NotificationRaised;
 

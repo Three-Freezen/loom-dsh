@@ -653,20 +653,30 @@ public sealed class TrayHost : IDisposable
             return;
         }
 
-        _settingsViewModel = new SettingsViewModel(Loom);
-        _settingsViewModel.Load(Loom.Config, Loom.GetStatus());
-        _settingsViewModel.RestartRequested += (_, _) => _services.RequestExit();
-        var window = new SettingsWindow(_settingsViewModel);
-        window.Closed += (_, _) =>
+        try
         {
-            _settingsWindow = null;
-            _settingsViewModel = null;
-            _ = RefreshStatusAsync();
-        };
-        _settingsWindow = window;
-        ApplyAppIcon(window);
-        window.Show();
-        window.Activate();
+            _settingsViewModel = new SettingsViewModel(Loom);
+            _settingsViewModel.Load(Loom.Config, Loom.GetStatus());
+            _settingsViewModel.RestartRequested += (_, _) => _services.RequestExit();
+            var window = new SettingsWindow(_settingsViewModel);
+            window.Closed += (_, _) =>
+            {
+                _settingsWindow = null;
+                _settingsViewModel = null;
+                _ = RefreshStatusAsync();
+            };
+            _settingsWindow = window;
+            ApplyAppIcon(window);
+            window.Show();
+            window.Activate();
+        }
+        catch (Exception exception)
+        {
+            // A failing window must be visible to the user (silent "nothing happens" is the worst
+            // possible outcome for a tray app) and must not leave half-initialized state behind.
+            CleanupFailedWindow(ref _settingsWindow, ref _settingsViewModel);
+            ReportWindowFailure("设置", exception);
+        }
     }
 
     public void ShowWizard() => OnUi(ShowWizardCore);
@@ -679,18 +689,26 @@ public sealed class TrayHost : IDisposable
             return;
         }
 
-        _firstRunViewModel = new FirstRunViewModel(Loom);
-        var window = new FirstRunWindow(_firstRunViewModel);
-        window.Closed += (_, _) =>
+        try
         {
-            _firstRunWindow = null;
-            _firstRunViewModel = null;
-            _ = RefreshStatusAsync();
-        };
-        _firstRunWindow = window;
-        ApplyAppIcon(window);
-        window.Show();
-        window.Activate();
+            _firstRunViewModel = new FirstRunViewModel(Loom);
+            var window = new FirstRunWindow(_firstRunViewModel);
+            window.Closed += (_, _) =>
+            {
+                _firstRunWindow = null;
+                _firstRunViewModel = null;
+                _ = RefreshStatusAsync();
+            };
+            _firstRunWindow = window;
+            ApplyAppIcon(window);
+            window.Show();
+            window.Activate();
+        }
+        catch (Exception exception)
+        {
+            CleanupFailedWindow(ref _firstRunWindow, ref _firstRunViewModel);
+            ReportWindowFailure("首次运行向导", exception);
+        }
     }
 
     public void ShowReport(string? path = null) => OnUi(() => ShowReportCore(path));
@@ -704,19 +722,74 @@ public sealed class TrayHost : IDisposable
             return;
         }
 
-        _reportViewModel = new ReportViewModel(Loom);
-        _reportViewModel.RollbackRequested += (_, _) => _ = RollbackAsync();
-        var window = new ReportWindow(_reportViewModel);
-        window.Closed += (_, _) =>
+        try
         {
-            _reportWindow = null;
-            _reportViewModel = null;
-        };
-        _reportWindow = window;
-        ApplyAppIcon(window);
-        window.Show();
-        window.Activate();
-        _ = _reportViewModel.LoadAsync(path);
+            _reportViewModel = new ReportViewModel(Loom);
+            _reportViewModel.RollbackRequested += (_, _) => _ = RollbackAsync();
+            var window = new ReportWindow(_reportViewModel);
+            window.Closed += (_, _) =>
+            {
+                _reportWindow = null;
+                _reportViewModel = null;
+            };
+            _reportWindow = window;
+            ApplyAppIcon(window);
+            window.Show();
+            window.Activate();
+            _ = _reportViewModel.LoadAsync(path);
+        }
+        catch (Exception exception)
+        {
+            CleanupFailedWindow(ref _reportWindow, ref _reportViewModel);
+            ReportWindowFailure("报告", exception);
+        }
+    }
+
+    /// <summary>Clears the cached window/view-model fields when window creation threw half-way.</summary>
+    private static void CleanupFailedWindow<TWindow, TViewModel>(ref TWindow? window, ref TViewModel? viewModel)
+        where TWindow : Window
+        where TViewModel : class
+    {
+        try
+        {
+            window?.Close();
+        }
+        catch
+        {
+            // best effort
+        }
+
+        window = null;
+        viewModel = null;
+    }
+
+    /// <summary>
+    /// Logs a window-open failure and tells the user what happened. Previously such exceptions were
+    /// swallowed by the dispatcher handler, so the window simply never appeared.
+    /// </summary>
+    private void ReportWindowFailure(string what, Exception exception)
+    {
+        try
+        {
+            _services.TryLogException(exception, $"{what}窗口打开失败");
+        }
+        catch
+        {
+            // best effort
+        }
+
+        try
+        {
+            MessageBox.Show(
+                $"{what}窗口打开失败：\n{exception.Message}\n\n详细信息已写入日志（数据目录\\logs\\loom.log）。",
+                "Loom for DSH",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+        catch
+        {
+            // best effort: never let a failure report crash the tray
+        }
     }
 
     private async Task RollbackAsync()
@@ -825,10 +898,22 @@ public sealed class TrayHost : IDisposable
 
                 var settingsViewModel = new SettingsViewModel(Loom);
                 settingsViewModel.Load(Loom.Config, status);
+                var settingsView = new SettingsView { DataContext = settingsViewModel };
                 results.Add(UiPreviewRenderer.Render(
-                    new SettingsView { DataContext = settingsViewModel },
+                    settingsView,
                     background,
                     Path.Combine(directory, $"settings-{theme}.png")));
+
+                // Second page with the in-app update card: it is the part most likely to break at
+                // runtime (read-only TwoWay bindings), so it gets its own preview snapshot.
+                var updateViewModel = new SettingsViewModel(Loom);
+                updateViewModel.Load(Loom.Config, status);
+                var updateView = new SettingsView { DataContext = updateViewModel };
+                updateView.SelectSection(2);
+                results.Add(UiPreviewRenderer.Render(
+                    updateView,
+                    background,
+                    Path.Combine(directory, $"settings-update-{theme}.png")));
 
                 var firstRunViewModel = new FirstRunViewModel(Loom);
                 firstRunViewModel.ApplyStatus(status);

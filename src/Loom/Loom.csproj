@@ -15,7 +15,7 @@
     <Description>Loom for DSH - tray guard + CLI for DSH plugin recovery.</Description>
     <AssemblyTitle>Loom for DSH</AssemblyTitle>
     <Product>Loom for DSH</Product>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
   </PropertyGroup>
 
   <ItemGroup>

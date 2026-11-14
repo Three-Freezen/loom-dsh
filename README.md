@@ -1,7 +1,7 @@
 # Loom for DSH · DSH 插件更新守护
 
-> 状态：**首版范围 A + 本轮迭代（托盘右键菜单重做、图标一致性、Inno Setup 安装包、安装目录数据根与旧数据迁移）完成；应用内更新（GitHub Releases 检查/下载/静默升级）已实现；第三轮独立 QA 通过（§13，无 P0/P1，4 项真机 smoke 见下），可发 beta**
-> 更新：2026-11-14 · GitHub 公开仓库（MIT）：<https://github.com/Three-Freezen/loom-dsh>
+> 状态：**0.1.1 已发布**（修复 0.1.0-beta 设置窗口打不开的问题）；范围 A 实现 + 托盘右键菜单/图标一致性 + Inno Setup 安装包 + 安装目录数据根与旧数据迁移 + 应用内更新（GitHub Releases）均已完成；第三轮独立 QA 通过（§13，无 P0/P1，4 项真机 smoke 见下）
+> 更新：2026-11-14 · GitHub 公开仓库（MIT）：<https://github.com/Three-Freezen/loom-dsh> · 最新版 **0.1.1**
 
 Loom（织机）是一个 Windows 托盘小工具 + 同名 CLI，用于在 DeepSeek Harness 桌面版每次自动更新后，自动保护/恢复已安装的插件（profile bundles、配置与兼容性状态），并在存在版本兼容问题时给出提示与处置（默认策略 A：自动升级到兼容版本）。
 
@@ -141,7 +141,7 @@ powershell -ExecutionPolicy Bypass -File scripts\pack-installer.ps1 -SkipPublish
 
 - 界面：`design/ui/LOOM-UI-dark.svg` / `.png`，`design/ui/LOOM-UI-light.svg` / `.png`
 - 图标：`design/icons/LOOM-icons.svg` / `.png`（定稿总览）；浅底/深底对钩 SVG/PNG/ICO（16–256）；圆点结备选在 `design/icons/alternatives/`
-- 实现渲染：`design/ui/impl-preview/`——`popup|settings|wizard|tray-menu-{dark,light}.png`（8 张，2x）+ `icon-parity.png`（软件内 LogoMark vs 托盘 ico 对照）
+- 实现渲染：`design/ui/impl-preview/`——`popup|settings|settings-update|wizard|tray-menu-{dark,light}.png`（10 张，2x）+ `icon-parity.png`（软件内 LogoMark vs 托盘 ico 对照）
 
 ## 当前进度（范围 A + 本轮迭代）
 
@@ -152,16 +152,17 @@ powershell -ExecutionPolicy Bypass -File scripts\pack-installer.ps1 -SkipPublish
    - 软件内图标与托盘图标统一：LogoMark 按设计 SVG 精确重绘、深/浅主题两套、对钩改品牌蓝；窗口图标随主题；托盘 ico 底色跟应用生效主题
    - Inno Setup 安装包（`installer\loom-dsh.iss`）：免管理员、`{userpf}\Loom`、固定包名 `loom-dsh-Setup.exe`、静默升级、卸载保留 Data、AppMutex 单实例保护
    - 数据目录改为安装版 `<安装目录>\Data`（绿色/开发保持 `%LOCALAPPDATA%\Loom`），首次启动自动迁移旧数据（可 `migrate-data` 手动/清理）
-4. ✅ 验证：第三轮独立 QA **通过**（报告 §13）：单元测试 **175/175**（QA 时 143，新增 32 个应用内更新用例）；沙箱验收脚本 **9/9**；UI 深/浅预览 **8 张** + 图标对照；安装/升级/卸载/迁移 e2e（SandboxTest）**21/21 PASS**；真实 profile/安装目录只读 SHA256 零漂移；正式安装包/通知区右键/静默升级重启/ACL 生效 4 项标 ENV-LIMITED，需真机 smoke
+4. ✅ 验证：第三轮独立 QA **通过**（报告 §13）：单元测试 **175/175**（QA 时 143，新增 32 个应用内更新用例）；沙箱验收脚本 **9/9**；UI 深/浅预览 **10 张** + 图标对照；安装/升级/卸载/迁移 e2e（SandboxTest）**21/21 PASS**；真实 profile/安装目录只读 SHA256 零漂移；正式安装包/通知区右键/静默升级重启/ACL 生效 4 项标 ENV-LIMITED，需真机 smoke
 5. ✅ 应用内更新（本轮新增）：GitHub Releases 检查（24h 节流）/ 下载（`.part` 原子）/ 静默升级 / 升级后清理；设置页更新卡片、托盘菜单「检查应用更新」、启动自动检查通知、CLI `update`；离线自测钩子与 32 个单元测试
-6. ⏳ 二期：策略 A 全自动、包级恢复、离线完整回滚、代码签名
+6. ✅ **0.1.1 修复**（已发布）：设置窗口打不开 ——「应用更新」卡片的 `ProgressBar.Value` 默认 TwoWay 绑定只读属性 `UpdateProgress`，WPF 在窗口 `Show()` 前抛 `InvalidOperationException` 并被 dispatcher 吞掉。改为 `Mode=OneWay`；同时让界面创建失败时写日志并弹提示、`ui render` 在 `finally` 无条件退出、`TryLogException` 复用服务 logger（修掉两个 FileLogger 互相覆盖日志的缺陷），并新增 `settings-update-*` 预览防回归。详见 [ui.md §10](docs/ui.md)
+7. ⏳ 二期：策略 A 全自动、包级恢复、离线完整回滚、代码签名
 
-## 发布包（本轮最终）
+## 发布包（0.1.1）
 
 | 产物 | 大小 | SHA256 |
 |---|---|---|
-| `dist\loom-dsh.exe` | 173,639,664 B | `0180891f4481e12a3ac830a775cfe26ea68fb00944c014ed9f8208195f8c1290` |
-| `dist\loom-dsh-Setup.exe` | 51,871,230 B | `e759335002e1dde326cba020d5020d067c20c85040f75a9ff5ae4acb3d76d14d` |
+| `dist\loom-dsh.exe` | 173,643,760 B | `c35405524e18c8476a43a16e2def1052741a1c5320380917c349ecd2a7df2f9c` |
+| `dist\loom-dsh-Setup.exe` | 51,862,695 B | `caa1b921f3abbe3d815d6bbf3b042fd39cf33872f0b4ada4c0803c62ed73e7aa` |
 
 - `dist\SHA256SUMS.txt`（两行）、`dist\发布说明.txt`（使用/安装/数据目录/迁移/范围说明）
 - 构建/发布脚本：`scripts\build.ps1`、`scripts\test.ps1`、`scripts\publish.ps1`、`scripts\pack-installer.ps1`；验收脚本：`scripts\acceptance-sandbox.ps1`
