@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Windows.Forms;
+using Loom.Core.Infrastructure;
 using Loom.Core.Models;
 
 namespace Loom.Services;
@@ -7,12 +8,15 @@ namespace Loom.Services;
 /// <summary>
 /// Decides whether a balloon notification should be shown: respects the config switch,
 /// quiet hours (default 23:00–08:00) and de-duplicates by EventId in memory.
-/// (LoomService already persists the last event id; this layer protects against duplicates
+/// (LoomService already persists the recent event ids; this layer protects against duplicates
 /// raised in quick succession and applies the quiet-hours policy.)
 /// </summary>
 internal sealed class NotificationPresenter
 {
-    private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+    /// <summary>内存去重窗口上限（FIFO）：托盘长期运行时不会无限增长。</summary>
+    private const int SeenCapacity = 200;
+
+    private readonly RecentEventSet _seen = new(SeenCapacity);
 
     public LoomNotification? Last { get; private set; }
 

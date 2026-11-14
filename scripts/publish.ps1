@@ -24,7 +24,7 @@ $withInstaller = -not $NoInstaller
 if ($Installer) { $withInstaller = $true }
 
 # 单一版本来源：Loom.csproj 的 <Version>（与安装包 /DAppVersion 一致）
-$version = '0.1.1'
+$version = '0.2.0'
 if (Test-Path $project) {
     [xml]$csproj = Get-Content $project -Raw -Encoding UTF8
     $fromCsproj = ($csproj.Project.PropertyGroup | ForEach-Object { $_.Version } |

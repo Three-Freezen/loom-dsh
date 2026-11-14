@@ -8,4 +8,9 @@
   </PropertyGroup>
   <!-- No ProjectReference on purpose: referencing the test project makes MSBuild probe workloads in
        the restricted sandbox. The test assembly is loaded via reflection at runtime instead. -->
+  <ItemGroup>
+    <!-- Loom.Tests uses WPF types (UiPreviewRenderer test); the console runner must load the
+         WindowsDesktop shared framework even though it does not use WPF itself. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+  </ItemGroup>
 </Project>

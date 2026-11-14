@@ -30,6 +30,17 @@ public sealed class SettingsViewModel : ObservableObject
     private string _quotaGbText = "1";
     private string _autoUpgradePolicy = "A";
 
+    // 二期：策略 A 自动升级 / 包级恢复（更新与兼容页）
+    private bool _autoUpgradeEnabled;
+    private bool _allowMajorUpgrade;
+    private bool _allowPrereleaseUpgrade;
+    private bool _packageRestoreEnabled;
+    private bool _packageRestoreAllowNetworkFallback;
+    private string _lastRollbackOpId = "";
+    private bool _canRollbackPackage;
+    private string _rollbackHintText = "暂无可回滚的包级操作";
+    private string _rollbackStatusText = "";
+
     private string _dataRootText = "";
     private string _installDirText = "";
     private string _profileDirText = "";
@@ -77,6 +88,7 @@ public sealed class SettingsViewModel : ObservableObject
             ApplyUpdate,
             () => !_updateBusy && _updateState == UpdateState.Ready);
         OpenReleasePageCommand = new RelayCommand(OpenReleasePage);
+        RollbackPackageCommand = new AsyncRelayCommand(RollbackPackageAsync, () => CanRollbackPackage && !IsBusy);
         RefreshUpdateState();
     }
 
@@ -98,6 +110,15 @@ public sealed class SettingsViewModel : ObservableObject
     public ICommand DownloadUpdateCommand { get; }
     public ICommand ApplyUpdateCommand { get; }
     public ICommand OpenReleasePageCommand { get; }
+
+    /// <summary>按 opId 离线回滚最近一次包级操作（仅 <see cref="CanRollbackPackage"/> 为真时可用）。</summary>
+    public ICommand RollbackPackageCommand { get; }
+
+    /// <summary>
+    /// 回滚前的确认回调（由 View 注入 MessageBox，VM 不直接弹窗，便于单测与预览）。
+    /// 未注入时按“用户未确认”处理：不执行任何写操作。
+    /// </summary>
+    public Func<string, bool>? ConfirmRollback { get; set; }
 
     /// <summary>保留份数下拉选项（字符串，便于直接与文本框/下拉绑定）。</summary>
     public IReadOnlyList<string> KeepOptions { get; } = new[] { "3", "5", "10", "20" };
@@ -149,6 +170,61 @@ public sealed class SettingsViewModel : ObservableObject
         get => _autoUpgradePolicy == "C";
         set { if (value) SetPolicy("C"); }
     }
+
+    // ------------------------------------------------------------- 二期：策略 A / 包级恢复
+
+    /// <summary>策略 A 自动升级总开关（默认关闭；打开后 Tick 才会在 DSH 退出后自动升级兼容插件）。</summary>
+    public bool AutoUpgradeEnabled
+    {
+        get => _autoUpgradeEnabled;
+        set
+        {
+            if (!Set(ref _autoUpgradeEnabled, value)) return;
+            OnPropertyChanged(nameof(AutoUpgradeHintText));
+        }
+    }
+
+    /// <summary>允许 major（大版本）升级；默认关闭，跨大版本可能涉及插件数据格式迁移。</summary>
+    public bool AllowMajorUpgrade { get => _allowMajorUpgrade; set => Set(ref _allowMajorUpgrade, value); }
+
+    /// <summary>允许预发布（nightly/next）候选；仍稳定版优先，只有没有稳定兼容版本时才会选中。</summary>
+    public bool AllowPrereleaseUpgrade { get => _allowPrereleaseUpgrade; set => Set(ref _allowPrereleaseUpgrade, value); }
+
+    /// <summary>包级恢复总开关（默认关闭；打开后才允许 CLI / 托盘执行恢复与回滚）。</summary>
+    public bool PackageRestoreEnabled
+    {
+        get => _packageRestoreEnabled;
+        set
+        {
+            if (!Set(ref _packageRestoreEnabled, value)) return;
+            OnPropertyChanged(nameof(PackageRestoreHintText));
+        }
+    }
+
+    /// <summary>离线失败后是否允许“询问”联网重试（仍需逐次同意；默认关闭）。</summary>
+    public bool PackageRestoreAllowNetworkFallback
+    {
+        get => _packageRestoreAllowNetworkFallback;
+        set => Set(ref _packageRestoreAllowNetworkFallback, value);
+    }
+
+    /// <summary>最近一个可回滚的包级 opId（来自 <c>LoomStatus.RollbackOperationId</c>）。</summary>
+    public string LastRollbackOpId { get => _lastRollbackOpId; private set => Set(ref _lastRollbackOpId, value); }
+
+    /// <summary>“回滚”按钮的启用依据（只读属性 → XAML 必须显式 Mode=OneWay）。</summary>
+    public bool CanRollbackPackage { get => _canRollbackPackage; private set => Set(ref _canRollbackPackage, value); }
+
+    public string RollbackHintText { get => _rollbackHintText; private set => Set(ref _rollbackHintText, value); }
+    public string RollbackStatusText { get => _rollbackStatusText; private set { Set(ref _rollbackStatusText, value); OnPropertyChanged(nameof(HasRollbackStatus)); } }
+    public bool HasRollbackStatus => RollbackStatusText.Length > 0;
+
+    public string AutoUpgradeHintText => AutoUpgradeEnabled
+        ? "已开启：DSH 完全退出后，Loom 会自动把“不兼容且有兼容版本”的插件升级到兼容版本（每次最多 3 个）。"
+        : "已关闭：只检查并提示，不会自动安装任何插件。";
+
+    public string PackageRestoreHintText => PackageRestoreEnabled
+        ? "已开启：包级恢复会写 profile 的两个核心文件并执行离线 install（需要 DSH 完全退出）。"
+        : "已关闭：包级恢复与离线回滚都会被拒绝，不写 profile。";
 
     // ------------------------------------------------------------- update
     public bool AutoCheckUpdate { get => _autoCheckUpdate; set => Set(ref _autoCheckUpdate, value); }
@@ -207,6 +283,15 @@ public sealed class SettingsViewModel : ObservableObject
         AutoCheckUpdate = config.AutoCheckUpdate;
         DeleteSetupAfterUpdate = config.DeleteSetupAfterUpdate;
 
+        // 二期字段（旧 config.json 缺字段时由 LoomConfig 默认值兜底）
+        AutoUpgradeEnabled = config.AutoUpgradeEnabled;
+        AllowMajorUpgrade = config.AllowMajorUpgrade;
+        AllowPrereleaseUpgrade = config.AllowPrereleaseUpgrade;
+        PackageRestoreEnabled = config.PackageRestoreEnabled;
+        PackageRestoreAllowNetworkFallback = config.PackageRestoreAllowNetworkFallback;
+        RollbackStatusText = "";
+        RefreshRollbackState(status);
+
         var installation = status.Installation;
         InstallDirText = string.IsNullOrWhiteSpace(installation?.InstallDir) ? "未找到（可在 CLI 用 --install-dir 指定）" : installation!.InstallDir;
         ProfileDirText = string.IsNullOrWhiteSpace(installation?.ProfileDir) ? "未找到" : installation!.ProfileDir;
@@ -249,9 +334,15 @@ public sealed class SettingsViewModel : ObservableObject
             UpdateState.UpToDate => updates.MessageText ?? "已是最新版本。",
             UpdateState.Available => $"发现新版本 {updates.NewVersion}，可下载安装。",
             UpdateState.Downloading => $"正在下载安装包… {updates.ProgressPercent}%",
-            UpdateState.Ready => _inAppUpdateSupported
+            UpdateState.Ready => (_inAppUpdateSupported
                 ? "安装包已下载，点击“重启并更新”静默安装。"
-                : "安装包已下载；当前为免安装版，请手动运行下载的安装包。",
+                : "安装包已下载；当前为免安装版，请手动运行下载的安装包。")
+                + "（" + (updates.IntegrityVerified, updates.IntegrityText) switch
+                {
+                    (true, _) => "SHA256 已校验",
+                    (false, { Length: > 0 } note) => note,
+                    _ => "未校验",
+                } + "）",
             UpdateState.Failed => "更新失败：" + (updates.ErrorText ?? "未知错误"),
             _ => "当前为免安装/开发版，不支持应用内更新。",
         };
@@ -373,6 +464,124 @@ public sealed class SettingsViewModel : ObservableObject
         }
     }
 
+    // ------------------------------------------------------------- 包级恢复 / 回滚
+
+    /// <summary>用当前状态刷新“回滚”可用性（opId 来自 <see cref="LoomStatus.RollbackOperationId"/>）。</summary>
+    private void RefreshRollbackState(LoomStatus status)
+    {
+        LastRollbackOpId = status.RollbackOperationId ?? "";
+        var canRollback = !string.IsNullOrWhiteSpace(LastRollbackOpId)
+                          && _loom.CanRollbackPackageOp(LastRollbackOpId);
+        CanRollbackPackage = canRollback;
+        RollbackHintText = canRollback
+            ? $"最近可回滚的包级操作：{LastRollbackOpId}"
+            : "暂无可回滚的包级操作（执行过包级恢复后才会出现回滚点）";
+        OnPropertyChanged(nameof(CanRollbackPackage));
+        (RollbackPackageCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>确认后按 opId 离线完整回滚（文件 + 离线 install + 再次校验）。</summary>
+    private async Task RollbackPackageAsync()
+    {
+        var opId = LastRollbackOpId;
+        if (string.IsNullOrWhiteSpace(opId))
+        {
+            ErrorText = "没有可回滚的包级操作。";
+            return;
+        }
+
+        // 二次确认由 View 注入（VM 不直接弹窗）；未注入时按“未确认”处理，绝不写 profile。
+        var confirmed = ConfirmRollback?.Invoke(
+            "将按操作 ID 离线回滚：\n"
+            + "• " + opId + "\n"
+            + "• 只恢复该操作的 profile 文件，并执行 install --offline --frozen-lockfile\n"
+            + "• 需要 DSH 完全退出；Loom 不会结束任何进程、不会联网\n\n是否继续？") ?? false;
+        if (!confirmed) return;
+
+        IsBusy = true;
+        ErrorText = "";
+        RollbackStatusText = "正在离线回滚…";
+        try
+        {
+            var result = await _loom.RollbackPackageOpAsync(opId).ConfigureAwait(true);
+            RollbackStatusText = result.Outcome switch
+            {
+                OperationOutcome.Succeeded =>
+                    $"已回滚 {opId}（校验{(result.Verified ? "通过" : "未通过")}），请重启 DSH。",
+                OperationOutcome.NeedsManual => "回滚需要人工处理：" + (result.Failure?.Message ?? "见报告"),
+                OperationOutcome.Cancelled => "回滚已取消。",
+                _ => "回滚失败：" + (result.Failure?.Message ?? "见报告"),
+            };
+            if (result.Outcome != OperationOutcome.Succeeded
+                && !string.IsNullOrWhiteSpace(result.Failure?.ManualAction))
+            {
+                RollbackStatusText += "（人工入口：" + result.Failure!.ManualAction + "）";
+            }
+
+            RefreshRollbackState(_loom.GetStatus());
+        }
+        catch (Exception exception)
+        {
+            ErrorText = "回滚失败：" + exception.Message;
+            RollbackStatusText = "";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 把界面当前值合并成新的 <see cref="LoomConfig"/>（不落盘、不弹窗、不碰 WPF 资源），
+    /// 供 <see cref="SaveAsync"/> 与单测共用：新增配置字段必须在这里显式透传，
+    /// 否则保存设置会把它们重置为默认值（丢配置）。
+    /// </summary>
+    internal LoomConfig BuildUpdatedConfig(int keepSnapshots, double quotaGb)
+    {
+        return new LoomConfig
+        {
+            SchemaVersion = _original.SchemaVersion,
+            InstallDir = _original.InstallDir,
+            DshHome = _original.DshHome,
+            ProfileDir = _original.ProfileDir,
+            DataRoot = _original.DataRoot,
+            AutoUpgradePolicy = _autoUpgradePolicy,
+            AllowMajorUpgrade = AllowMajorUpgrade,
+            // 二期新增字段必须全部透传（见类文档与 SettingsView 的“更新与兼容”页）。
+            AutoUpgradeEnabled = AutoUpgradeEnabled,
+            AllowPrereleaseUpgrade = AllowPrereleaseUpgrade,
+            UpgradeQueryTimeoutSeconds = _original.UpgradeQueryTimeoutSeconds,
+            UpgradeInstallTimeoutSeconds = _original.UpgradeInstallTimeoutSeconds,
+            RequireAppExitForUpgrade = _original.RequireAppExitForUpgrade,
+            PackageRestoreEnabled = PackageRestoreEnabled,
+            PackageRestoreAllowNetworkFallback = PackageRestoreAllowNetworkFallback,
+            PackageRestoreInstallTimeoutSeconds = _original.PackageRestoreInstallTimeoutSeconds,
+            PackageRestoreReadyTimeoutSeconds = _original.PackageRestoreReadyTimeoutSeconds,
+            KeepRollbackBackups = _original.KeepRollbackBackups,
+            KeepSnapshots = keepSnapshots,
+            MaxSnapshotBytes = (long)(quotaGb * 1024 * 1024 * 1024),
+            MaxArchiveBytes = _original.MaxArchiveBytes,
+            FullSnapshotOnUpdate = FullSnapshotOnUpdate,
+            AutoSnapshotOnStartup = AutoSnapshotOnStartup,
+            AutoRestoreAfterRecovery = AutoRestoreAfterRecovery,
+            Notifications = Notifications,
+            QuietHoursStart = QuietHoursStart.Trim(),
+            QuietHoursEnd = QuietHoursEnd.Trim(),
+            QuietHoursEnabled = QuietHoursEnabled,
+            Autostart = Autostart,
+            LogLevel = _original.LogLevel,
+            Theme = _theme,
+            AutoCheckUpdate = AutoCheckUpdate,
+            DeleteSetupAfterUpdate = DeleteSetupAfterUpdate,
+            LastUpdateCheckUtc = _original.LastUpdateCheckUtc,
+            FirstRunCompleted = _original.FirstRunCompleted,
+            HealthCheckSeconds = _original.HealthCheckSeconds,
+            StartupSnapshotDelaySeconds = _original.StartupSnapshotDelaySeconds,
+            ProfileChangeDebounceSeconds = _original.ProfileChangeDebounceSeconds,
+            OperationTimeoutSeconds = _original.OperationTimeoutSeconds,
+        };
+    }
+
     private async Task SaveAsync()
     {
         SaveText = UiStrings.SettingsSaving;
@@ -400,37 +609,7 @@ public sealed class SettingsViewModel : ObservableObject
                 return;
             }
 
-            var updated = new LoomConfig
-            {
-                SchemaVersion = _original.SchemaVersion,
-                InstallDir = _original.InstallDir,
-                DshHome = _original.DshHome,
-                ProfileDir = _original.ProfileDir,
-                DataRoot = _original.DataRoot,
-                AutoUpgradePolicy = _autoUpgradePolicy,
-                AllowMajorUpgrade = _original.AllowMajorUpgrade,
-                KeepSnapshots = keep,
-                MaxSnapshotBytes = (long)(quotaGb * 1024 * 1024 * 1024),
-                MaxArchiveBytes = _original.MaxArchiveBytes,
-                FullSnapshotOnUpdate = FullSnapshotOnUpdate,
-                AutoSnapshotOnStartup = AutoSnapshotOnStartup,
-                AutoRestoreAfterRecovery = AutoRestoreAfterRecovery,
-                Notifications = Notifications,
-                QuietHoursStart = QuietHoursStart.Trim(),
-                QuietHoursEnd = QuietHoursEnd.Trim(),
-                QuietHoursEnabled = QuietHoursEnabled,
-                Autostart = Autostart,
-                LogLevel = _original.LogLevel,
-                Theme = _theme,
-                AutoCheckUpdate = AutoCheckUpdate,
-                DeleteSetupAfterUpdate = DeleteSetupAfterUpdate,
-                LastUpdateCheckUtc = _original.LastUpdateCheckUtc,
-                FirstRunCompleted = _original.FirstRunCompleted,
-                HealthCheckSeconds = _original.HealthCheckSeconds,
-                StartupSnapshotDelaySeconds = _original.StartupSnapshotDelaySeconds,
-                ProfileChangeDebounceSeconds = _original.ProfileChangeDebounceSeconds,
-                OperationTimeoutSeconds = _original.OperationTimeoutSeconds,
-            };
+            var updated = BuildUpdatedConfig(keep, quotaGb);
 
             await _loom.SaveConfigAsync(updated).ConfigureAwait(true);
             var autostartChanged = updated.Autostart != _original.Autostart;

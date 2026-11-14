@@ -226,6 +226,84 @@ public sealed class RestoreServiceTests
     }
 
     [Fact]
+    public async Task SkippedCountMatchesSkipMessagesExactlyOnce()
+    {
+        using var sandbox = new LoomSandbox();
+        SeedProfile(sandbox);
+        var (manifest, reference) = await TakeBaseline(sandbox);
+
+        // 构造最小计划：一个真实写入动作（lockfile）+ 两个 Skip，避免 RestorePlanner 额外产生跳过项。
+        sandbox.WriteProfileFile(DshDefaults.LockfileFile, "lockfileVersion: '9.0'\n# user touched\n");
+        var plan = new RestorePlan
+        {
+            SnapshotDir = reference.Path,
+            SnapshotId = reference.Id,
+        };
+        plan.Actions.Add(new RestoreAction
+        {
+            Kind = RestoreActionKind.RestoreLockfile,
+            TargetFile = DshDefaults.LockfileFile,
+            Description = "还原 lockfile",
+            Detail = "snapshot",
+        });
+        plan.Actions.Add(new RestoreAction
+        {
+            Kind = RestoreActionKind.Skip,
+            TargetFile = DshDefaults.ManifestFile,
+            Description = "skip-one",
+        });
+        plan.Actions.Add(new RestoreAction
+        {
+            Kind = RestoreActionKind.Skip,
+            TargetFile = DshDefaults.ManifestFile,
+            Description = "skip-two",
+        });
+
+        var result = await new RestoreService(Logger).ApplyAsync(Request(sandbox, plan, manifest, "op-skip-count"));
+
+        Assert.Equal(OperationOutcome.Succeeded, result.Outcome);
+        var skipMessages = result.Messages
+            .Where(message => message.StartsWith("[已跳过]", StringComparison.Ordinal))
+            .ToList();
+        // 每个 plan Skip 只产生一条消息，也只计数一次（回归：预循环与 ApplyAction 重复 +1）。
+        Assert.Equal(2, skipMessages.Count);
+        Assert.Equal(2, result.SkippedCount);
+        Assert.Single(skipMessages, message => message.EndsWith("skip-one", StringComparison.Ordinal));
+        Assert.Single(skipMessages, message => message.EndsWith("skip-two", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RestoresMissingPackageJsonAtomically()
+    {
+        using var sandbox = new LoomSandbox();
+        SeedProfile(sandbox);
+        var (manifest, reference) = await TakeBaseline(sandbox);
+        var packagePath = sandbox.ProfilePath(DshDefaults.ManifestFile);
+        var expected = File.ReadAllText(packagePath);
+        File.Delete(packagePath);
+
+        var plan = new RestorePlan
+        {
+            SnapshotDir = reference.Path,
+            SnapshotId = reference.Id,
+        };
+        plan.Actions.Add(new RestoreAction
+        {
+            Kind = RestoreActionKind.RestorePackageJson,
+            TargetFile = DshDefaults.ManifestFile,
+            Description = "恢复缺失的 package.json",
+            Detail = "snapshot",
+        });
+
+        var result = await new RestoreService(Logger).ApplyAsync(Request(sandbox, plan, manifest, "op-pkg-json"));
+
+        Assert.Equal(OperationOutcome.Succeeded, result.Outcome);
+        Assert.Equal(expected, File.ReadAllText(packagePath));
+        // 原实现是 File.Copy(overwrite:false)；原子写不应留下临时文件。
+        Assert.Empty(Directory.GetFiles(sandbox.ProfileDir, "package.json.tmp-*"));
+    }
+
+    [Fact]
     public async Task RestoresOnlyExactRuntimeCompatibilityExemptions()
     {
         using var sandbox = new LoomSandbox();

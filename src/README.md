@@ -98,18 +98,20 @@ powershell -ExecutionPolicy Bypass -File scripts\acceptance-sandbox.ps1  # 沙�
 - `loom-dsh ui settings|popup|wizard|report`：正常打开窗口（托盘未运行时会自动拉起）。
 - `App.ShowTarget` 已把 `render` 路由到 `TrayHost.RenderSnapshots`；`TrayHost` 是 ui-tray 维护的文件。
 
-## 7. 实现状态（2026-11-14，范围 A）
+## 7. 实现状态（2026-11-14，范围 A + 二期 0.2.0）
 
 | 区域 | 状态 |
 |---|---|
 | 环境适配（定位/进程/三锁/CLI 封装/更新器/自启/体检/Electron helper） | ✅ 完成（env-adapters，35 用例） |
 | 核心工作流（ProfileReader/快照/保留/check/证据/还原/报告） | ✅ 完成（core-flows，41 用例） |
 | 编排/CLI/单实例/命令队列/状态机/通知 | ✅ 完成（Lead） |
-| WPF 托盘/弹层/设置/向导/报告/深浅主题/render 自检 | ✅ 完成（ui-tray，6 张 2x 预览） |
-| 单元测试 | 121/121 通过（含基础设施、核心、环境、UI 渲染与 P1 回归） |
+| 二期：策略 A 自动升级 / 包级恢复 / 离线完整回滚 | ✅ 完成（默认关闭，标实验性；`upgrade` / `recovery plan\|apply\|rollback`） |
+| 跨进程一致性（数据根派生命名互斥量 + 数据根文件锁 + 跨进程安装包校验） | ✅ 完成（收口轮次） |
+| WPF 托盘/弹层/设置/向导/报告/深浅主题/render 自检 | ✅ 完成（ui-tray，render 12 张 2x 预览） |
+| 单元测试 | **403/403** 通过（含基础设施、核心、环境、更新、二期与 UI 渲染审计） |
 | 沙箱验收脚本 | 9/9 通过（A01/A06/A14/A14b/A15/A16/A17/A23/A26 辅助） |
-| 单文件发布 | ✅ 173,544,432 bytes，`dist\loom-dsh.exe`，SHA256 `e257fc30…9f6150` |
-| 二期（策略 A 全自动/包级恢复/离线回滚/Toast） | 未实现，按范围 A 约定 |
+| 单文件发布 | ✅ `dist\loom-dsh.exe`（0.2.0 本地构建 173,921,776 B，SHA256 `1f1fccfa…4908e5`；未发布） |
+| 代码签名 / 跨进程 config 写协调 / 真机 smoke | ⏳ 未做（见 `docs/验收报告.md` §14.6/§14.7） |
 
 ### 已知限制（发布说明需保留）
 

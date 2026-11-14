@@ -11,6 +11,9 @@ spike/
 *.user
 *.suo
 
+# Scratch logs left at the repo root by local build/verify runs
+/.tmp-*.log
+
 # Sogou input method / local debug logs (not product output)
 /debug.log
 

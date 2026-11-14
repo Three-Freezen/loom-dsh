@@ -100,6 +100,24 @@ public sealed class AtomicFileTests
         Assert.False(File.Exists(path));
         Assert.NotEmpty(Directory.GetFiles(temp.Path, "state.json.corrupt-*"));
     }
+
+    [Fact]
+    public void FailedAtomicWriteLeavesExistingFileIntact()
+    {
+        using var temp = new TempDir();
+        var path = Path.Combine(temp.Path, "package.json");
+        File.WriteAllText(path, "{\"original\":true}");
+
+        // 目标文件被独占打开时 rename 会失败；原子写必须保留原内容并清掉临时文件。
+        // （Windows 可能把共享冲突映射为 IOException 或 UnauthorizedAccessException，这里只要求失败。）
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.ThrowsAny<Exception>(() => AtomicFile.WriteAllText(path, "{\"replacement\":true}"));
+        }
+
+        Assert.Equal("{\"original\":true}", File.ReadAllText(path));
+        Assert.Empty(Directory.GetFiles(temp.Path, "package.json.tmp-*"));
+    }
 }
 
 public sealed class ConfigStoreTests
@@ -250,5 +268,25 @@ public sealed class QueueIpcTests
         var response = await client.SubmitAsync(new[] { "status" }, TimeSpan.FromMilliseconds(400));
         Assert.Null(response);
         Assert.Empty(Directory.GetFiles(paths.QueueRequestsDir));
+    }
+
+    [Fact]
+    public void QueueWorkerLockIsExclusivePerDataRoot()
+    {
+        using var first = new TempDir();
+        using var second = new TempDir();
+        var paths = first.Paths;
+        using var serverA = new QueueServer(paths, (_, _) => Task.FromResult(new CliProcessResult()));
+        using var serverB = new QueueServer(paths, (_, _) => Task.FromResult(new CliProcessResult()));
+        using var serverOtherRoot = new QueueServer(second.Paths, (_, _) => Task.FromResult(new CliProcessResult()));
+
+        Assert.NotEqual(QueueServer.WorkerLockPathFor(paths), QueueServer.WorkerLockPathFor(second.Paths));
+
+        using var held = serverA.TryAcquireWorkerLock();
+        Assert.NotNull(held);
+        Assert.Null(serverB.TryAcquireWorkerLock()); // 同一数据根：第二个泵必须让位
+
+        using var other = serverOtherRoot.TryAcquireWorkerLock();
+        Assert.NotNull(other); // 不同数据根：互不阻塞（P3-R1）
     }
 }

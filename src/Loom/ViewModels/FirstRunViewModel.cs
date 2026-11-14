@@ -189,34 +189,15 @@ public sealed class FirstRunViewModel : ObservableObject
         }
     }
 
-    private static LoomConfig CloneConfig(LoomConfig source) => new()
-    {
-        SchemaVersion = source.SchemaVersion,
-        InstallDir = source.InstallDir,
-        DshHome = source.DshHome,
-        ProfileDir = source.ProfileDir,
-        DataRoot = source.DataRoot,
-        AutoUpgradePolicy = source.AutoUpgradePolicy,
-        AllowMajorUpgrade = source.AllowMajorUpgrade,
-        KeepSnapshots = source.KeepSnapshots,
-        MaxSnapshotBytes = source.MaxSnapshotBytes,
-        MaxArchiveBytes = source.MaxArchiveBytes,
-        FullSnapshotOnUpdate = source.FullSnapshotOnUpdate,
-        AutoSnapshotOnStartup = source.AutoSnapshotOnStartup,
-        AutoRestoreAfterRecovery = source.AutoRestoreAfterRecovery,
-        Notifications = source.Notifications,
-        QuietHoursStart = source.QuietHoursStart,
-        QuietHoursEnd = source.QuietHoursEnd,
-        QuietHoursEnabled = source.QuietHoursEnabled,
-        Autostart = source.Autostart,
-        LogLevel = source.LogLevel,
-        Theme = source.Theme,
-        FirstRunCompleted = source.FirstRunCompleted,
-        HealthCheckSeconds = source.HealthCheckSeconds,
-        StartupSnapshotDelaySeconds = source.StartupSnapshotDelaySeconds,
-        ProfileChangeDebounceSeconds = source.ProfileChangeDebounceSeconds,
-        OperationTimeoutSeconds = source.OperationTimeoutSeconds,
-    };
+    /// <summary>
+    /// 向导只改 <c>FirstRunCompleted/Autostart/Theme</c> 三个字段，其余必须原样保留。
+    /// P3：旧实现是手写全量拷贝，二期新增字段（AutoUpgradeEnabled/AllowPrereleaseUpgrade/
+    /// PackageRestore*/KeepRollbackBackups…）与 AutoCheckUpdate/DeleteSetupAfterUpdate/
+    /// LastUpdateCheckUtc 全部漏掉，向导“完成”会把它们重置为默认值。改为 JSON 深拷贝，
+    /// 以后新增配置字段也不需要再改这里（与 SettingsViewModel.BuildUpdatedConfig 的手工透传互补）。
+    /// </summary>
+    internal static LoomConfig CloneConfig(LoomConfig source) =>
+        JsonDefaults.Deserialize<LoomConfig>(JsonDefaults.Serialize(source)) ?? new LoomConfig();
 
     private void OpenProfileFolder()
     {

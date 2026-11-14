@@ -5,7 +5,8 @@
     <IsTestProject>true</IsTestProject>
     <RootNamespace>Loom.Tests</RootNamespace>
     <AssemblyName>Loom.Tests</AssemblyName>
-    <UseWPF>false</UseWPF>
+    <!-- R6：UiPreviewRenderer 单元测试需要 WPF 类型（在独立 STA 线程里跑，不启动 Application）。 -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
 
   <ItemGroup>

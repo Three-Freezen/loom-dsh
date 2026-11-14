@@ -63,8 +63,28 @@ public static class UiPreviewRenderer
         var directory = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
 
-        using var stream = File.Create(outputPath);
-        encoder.Save(stream);
+        using (var stream = File.Create(outputPath))
+        {
+            encoder.Save(stream);
+        }
+
+        // R6：产物必须是非空 PNG；空文件/编码失败时让 ui render 走失败退出码，而不是静默成功。
+        var info = new FileInfo(outputPath);
+        if (!info.Exists || info.Length < 8)
+        {
+            throw new InvalidOperationException("界面预览 PNG 生成失败（文件为空）：" + outputPath);
+        }
+
+        var signature = new byte[8];
+        using (var read = File.OpenRead(outputPath))
+        {
+            if (read.Read(signature, 0, signature.Length) != signature.Length
+                || signature[0] != 0x89 || signature[1] != 0x50 || signature[2] != 0x4E || signature[3] != 0x47)
+            {
+                throw new InvalidOperationException("界面预览 PNG 文件头无效：" + outputPath);
+            }
+        }
+
         return outputPath;
     }
 

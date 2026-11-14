@@ -5,7 +5,9 @@ using Loom.Core.Abstractions;
 using Loom.Core.Infrastructure;
 using Loom.Core.Ipc;
 using Loom.Core.Models;
+using Loom.Core.Recovery;
 using Loom.Core.Update;
+using Loom.Core.Upgrade;
 
 namespace Loom.Core.Cli;
 
@@ -29,7 +31,8 @@ public sealed class CliRunner
     {
         if (invocation.Error is not null)
         {
-            return Error(invocation, stdout, stderr, invocation.Error, ExitCodes.Busy);
+            // 参数错误属于“失败”(1)，不是“忙”(4)；与直接 CLI/托盘队列保持同一退出码语义。
+            return Error(invocation, stdout, stderr, invocation.Error, ExitCodes.Failed);
         }
 
         if (invocation.Help || string.Equals(invocation.Command, "help", StringComparison.OrdinalIgnoreCase))
@@ -46,6 +49,8 @@ public sealed class CliRunner
                 "snapshot" => await SnapshotAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
                 "check" => await CheckAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
                 "restore" => await RestoreAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
+                "upgrade" => await UpgradeAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
+                "recovery" => await RecoveryAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
                 "report" => await ReportAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
                 "doctor" => await DoctorAsync(invocation, stdout, cancellationToken).ConfigureAwait(false),
                 "migrate-data" => await MigrateDataAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
@@ -54,7 +59,7 @@ public sealed class CliRunner
                 "uninstall-autostart" => await AutostartAsync(false, invocation, stdout, cancellationToken).ConfigureAwait(false),
                 "version" => Version(invocation, stdout),
                 "ui" => await UiAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
-                _ => Error(invocation, stdout, stderr, $"未知命令：{invocation.Command}", ExitCodes.Busy),
+                _ => Error(invocation, stdout, stderr, $"未知命令：{invocation.Command}", ExitCodes.Failed),
             };
         }
         catch (OperationCanceledException)
@@ -266,6 +271,518 @@ public sealed class CliRunner
         };
     }
 
+    // ---------------------------------------------------------------- 二期：插件升级（策略 A）
+
+    /// <summary>批量升级时一次最多处理的插件数量（与 Tick 自动升级保持一致）。</summary>
+    private const int MaxUpgradeBatch = 3;
+
+    /// <summary>
+    /// <c>loom-dsh upgrade [--pkg &lt;name&gt;] [--dry-run] [--json] [--allow-prerelease]</c>：
+    /// 策略 A 查询兼容候选并升级；不带 --pkg 时按最近一次检查结果批量处理“不兼容且版本已知”的插件。
+    /// </summary>
+    private async Task<int> UpgradeAsync(
+        CliInvocation invocation,
+        TextWriter stdout,
+        TextWriter stderr,
+        CancellationToken cancellationToken)
+    {
+        var targets = new List<(string Name, string Version)>();
+        if (!string.IsNullOrWhiteSpace(invocation.PackageName))
+        {
+            targets.Add((invocation.PackageName!.Trim(), ""));
+        }
+        else
+        {
+            var check = await _loom.GetLastCheckAsync(cancellationToken).ConfigureAwait(false);
+            if (check?.Plugins is null || check.Plugins.Count == 0)
+            {
+                return Error(
+                    invocation,
+                    stdout,
+                    stderr,
+                    "没有可用的兼容性检查结果：先运行 loom-dsh check，或用 --pkg 指定插件包名。",
+                    ExitCodes.Unavailable);
+            }
+
+            targets.AddRange(check.Plugins
+                .Where(plugin => plugin.Compatibility == CompatibilityLevel.Incompatible)
+                .Where(plugin => !string.IsNullOrWhiteSpace(plugin.Name) && !string.IsNullOrWhiteSpace(plugin.Version))
+                .GroupBy(plugin => plugin.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(group => (group.First().Name, group.First().Version))
+                .Take(MaxUpgradeBatch)
+                .ToList());
+
+            if (targets.Count == 0)
+            {
+                if (invocation.Json)
+                {
+                    WriteJson(stdout, new { ok = true, dryRun = invocation.DryRun, results = Array.Empty<object>(), message = "没有不兼容插件需要升级。" });
+                }
+                else
+                {
+                    stdout.WriteLine("没有不兼容插件需要升级（基于最近一次兼容性检查结果）。");
+                }
+
+                return ExitCodes.Success;
+            }
+        }
+
+        var results = new List<UpgradeExecutionResult>();
+        var exitCode = ExitCodes.Success;
+        foreach (var (name, version) in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = await _loom.UpgradePluginAsync(
+                new UpgradeRequest
+                {
+                    PackageName = name,
+                    // 空 = 由服务从 profile 读当前版本（未知则服务会拒绝自动升级，绝不猜）。
+                    InstalledVersion = version,
+                    DryRun = invocation.DryRun,
+                    AllowPrerelease = invocation.AllowPrerelease,
+                },
+                progress: null,
+                cancellationToken).ConfigureAwait(false);
+            results.Add(result);
+
+            if (!invocation.Quiet && targets.Count > 1)
+            {
+                stderr.WriteLine($"[{result.Outcome}] {name}：{FirstUpgradeMessage(result)}");
+            }
+
+            exitCode = MergeExitCode(exitCode, MapUpgradeExit(result));
+            if (!invocation.DryRun && result.Outcome is OperationOutcome.Failed or OperationOutcome.Cancelled)
+            {
+                // 失败停止本批（与 Tick 自动升级一致），后续插件留给下一次/人工处理。
+                break;
+            }
+        }
+
+        if (invocation.Json)
+        {
+            if (results.Count == 1 && !string.IsNullOrWhiteSpace(invocation.PackageName))
+            {
+                WriteJson(stdout, ToUpgradeJson(results[0]));
+            }
+            else
+            {
+                WriteJson(stdout, new
+                {
+                    ok = exitCode == ExitCodes.Success,
+                    dryRun = invocation.DryRun,
+                    results = results.Select(ToUpgradeJson).ToList(),
+                });
+            }
+        }
+        else
+        {
+            foreach (var result in results)
+            {
+                var decision = result.Decision;
+                stdout.WriteLine($"插件      ：{decision.PackageName}");
+                stdout.WriteLine($"结果      ：{OutcomeLabel(result.Outcome)}");
+                stdout.WriteLine($"决策      ：{decision.Kind}（{decision.BlockReason}）");
+                if (!string.IsNullOrWhiteSpace(decision.TargetVersion))
+                {
+                    stdout.WriteLine($"版本      ：{decision.InstalledVersion} → {decision.TargetVersion}（目标运行时 {decision.TargetDshVersion}）");
+                }
+
+                stdout.WriteLine($"说明      ：{FirstUpgradeMessage(result)}");
+                if (!string.IsNullOrWhiteSpace(result.CommandLine)) stdout.WriteLine($"命令      ：{result.CommandLine}");
+                if (!string.IsNullOrWhiteSpace(result.BackupDir)) stdout.WriteLine($"写前备份  ：{result.BackupDir}");
+                if (!string.IsNullOrWhiteSpace(result.AuditPath)) stdout.WriteLine($"审计      ：{result.AuditPath}");
+                if (!string.IsNullOrWhiteSpace(decision.ManualHint)) stdout.WriteLine($"人工入口  ：{decision.ManualHint}");
+                stdout.WriteLine();
+            }
+
+            if (invocation.DryRun) stdout.WriteLine("（演练：未备份、未安装、未写 journal/审计文件）");
+            if (results.Any(result => result.ProfileChanged)) stdout.WriteLine("请重启 DSH 使插件升级生效。");
+        }
+
+        return exitCode;
+    }
+
+    private static string FirstUpgradeMessage(UpgradeExecutionResult result) =>
+        result.Messages.FirstOrDefault(message => !string.IsNullOrWhiteSpace(message))
+        ?? result.Decision.Reason
+        ?? result.Outcome.ToString();
+
+    private static object ToUpgradeJson(UpgradeExecutionResult result) => new
+    {
+        packageName = result.Decision.PackageName,
+        operationId = result.OperationId,
+        outcome = result.Outcome.ToString(),
+        decision = result.Decision.Kind.ToString(),
+        blockReason = result.Decision.BlockReason.ToString(),
+        reason = result.Decision.Reason,
+        manualHint = result.Decision.ManualHint,
+        installedVersion = result.Decision.InstalledVersion,
+        targetVersion = result.Decision.TargetVersion,
+        targetDshVersion = result.Decision.TargetDshVersion,
+        commandLine = result.CommandLine,
+        backupDir = result.BackupDir,
+        auditPath = result.AuditPath,
+        failureClass = result.Audit?.FailureClass.ToString(),
+        profileChanged = result.ProfileChanged,
+        messages = result.Messages,
+    };
+
+    /// <summary>单个升级结果的退出码（0 成功 / 1 失败 / 2 待人工 / 3 不可用 / 4 忙）。</summary>
+    private static int MapUpgradeExit(UpgradeExecutionResult result) => result.Outcome switch
+    {
+        OperationOutcome.Succeeded or OperationOutcome.DryRun => ExitCodes.Success,
+        OperationOutcome.Skipped => result.Decision.BlockReason is UpgradeBlockReason.Offline or UpgradeBlockReason.RegistryUnavailable
+            ? ExitCodes.Unavailable
+            : ExitCodes.Success,
+        OperationOutcome.NeedsManual => result.Decision.BlockReason == UpgradeBlockReason.AppRunning
+            ? ExitCodes.Busy
+            : ExitCodes.NeedsManual,
+        OperationOutcome.Cancelled => ExitCodes.Failed,
+        _ => result.Audit?.FailureClass switch
+        {
+            UpgradeFailureClass.Offline => ExitCodes.Unavailable,
+            UpgradeFailureClass.AppRunning => ExitCodes.Busy,
+            _ => result.ErrorCode is not null ? MapExitCode(result.ErrorCode) : ExitCodes.Failed,
+        },
+    };
+
+    /// <summary>批量结果取“最严重”的退出码：失败(1) &gt; 忙(4) &gt; 待人工(2) &gt; 不可用(3) &gt; 成功(0)。</summary>
+    private static int MergeExitCode(int current, int next) =>
+        ExitSeverity(current) >= ExitSeverity(next) ? current : next;
+
+    private static int ExitSeverity(int exitCode) => exitCode switch
+    {
+        ExitCodes.Failed => 4,
+        ExitCodes.Busy => 3,
+        ExitCodes.NeedsManual => 2,
+        ExitCodes.Unavailable => 1,
+        _ => 0,
+    };
+
+    // ---------------------------------------------------------------- 二期：包级恢复 / 离线回滚
+
+    /// <summary>
+    /// <c>loom-dsh recovery plan|apply|rollback [--snapshot &lt;id&gt;] [--dry-run] [--json]</c>。
+    /// rollback 用法：<c>loom-dsh recovery rollback &lt;opId&gt;</c>。
+    /// </summary>
+    private async Task<int> RecoveryAsync(
+        CliInvocation invocation,
+        TextWriter stdout,
+        TextWriter stderr,
+        CancellationToken cancellationToken)
+    {
+        var subcommand = invocation.Positionals.Count > 0 ? invocation.Positionals[0].Trim().ToLowerInvariant() : "";
+        return subcommand switch
+        {
+            "plan" => await RecoveryPlanAsync(invocation, stdout, cancellationToken).ConfigureAwait(false),
+            "apply" => await RecoveryApplyAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
+            "rollback" => await RecoveryRollbackAsync(invocation, stdout, stderr, cancellationToken).ConfigureAwait(false),
+            _ => Error(
+                invocation,
+                stdout,
+                stderr,
+                "recovery 需要子命令：plan|apply|rollback（例：loom-dsh recovery plan --json，"
+                + "loom-dsh recovery apply --snapshot <id>，loom-dsh recovery rollback <opId>）",
+                ExitCodes.Failed),
+        };
+    }
+
+    private async Task<int> RecoveryPlanAsync(
+        CliInvocation invocation,
+        TextWriter stdout,
+        CancellationToken cancellationToken)
+    {
+        var plan = await _loom.PreviewPackageRestoreAsync(
+            BuildPackageRestoreRequest(invocation, dryRun: true),
+            cancellationToken).ConfigureAwait(false);
+
+        if (invocation.Json)
+        {
+            WriteJson(stdout, ToPlanJson(plan));
+        }
+        else
+        {
+            stdout.WriteLine("包级恢复计划（预览，不写任何文件）");
+            stdout.WriteLine($"操作 ID   ：{plan.OperationId}");
+            stdout.WriteLine($"快照      ：{(string.IsNullOrWhiteSpace(plan.SnapshotId) ? "（未指定）" : plan.SnapshotId)}");
+            stdout.WriteLine($"profile   ：{plan.ProfileDir}");
+            stdout.WriteLine($"需要退出  ：{(plan.RequiresFullExit ? "是（Loom 不会结束进程）" : "否")}");
+            stdout.WriteLine($"联网回退  ：{(plan.OfflineOnly ? "关闭（仅离线）" : "已启用（需用户同意）")}");
+            stdout.WriteLine($"摘要      ：{plan.Summary}");
+            foreach (var step in plan.OrderedSteps)
+            {
+                var status = step.Skip ? "跳过" : "计划";
+                stdout.WriteLine($"  [{status}] {step.Order}: {step.Kind} · {step.Description}");
+                if (!string.IsNullOrWhiteSpace(step.DisplayCommand)) stdout.WriteLine($"         {step.DisplayCommand}");
+            }
+
+            foreach (var precondition in plan.Preconditions.Where(item => !item.Satisfied))
+            {
+                stdout.WriteLine($"  [不满足] {precondition.Code}：{precondition.Detail}");
+                if (!string.IsNullOrWhiteSpace(precondition.ManualAction)) stdout.WriteLine($"           人工入口：{precondition.ManualAction}");
+            }
+
+            if (plan.IsBlocked)
+            {
+                stdout.WriteLine("结论      ：前置条件不满足，不能执行（未写入任何文件）");
+                stdout.WriteLine("原因      ：" + (plan.BlockingFailure?.Message ?? "未知"));
+                if (!string.IsNullOrWhiteSpace(plan.BlockingFailure?.ManualAction))
+                {
+                    stdout.WriteLine("人工入口  ：" + plan.BlockingFailure!.ManualAction);
+                }
+            }
+            else
+            {
+                stdout.WriteLine("结论      ：可以执行（loom-dsh recovery apply）");
+            }
+        }
+
+        return plan.IsBlocked
+            ? MapRestoreFailure(plan.BlockingFailure?.Kind ?? PackageRestoreFailureKind.Precondition)
+            : ExitCodes.Success;
+    }
+
+    private async Task<int> RecoveryApplyAsync(
+        CliInvocation invocation,
+        TextWriter stdout,
+        TextWriter stderr,
+        CancellationToken cancellationToken)
+    {
+        var progress = new Progress<OperationProgress>(item =>
+        {
+            if (!invocation.Quiet) stderr.WriteLine($"[{item.Stage}] {item.Message}");
+        });
+        var result = await _loom.PackageRestoreAsync(
+            BuildPackageRestoreRequest(invocation, dryRun: invocation.DryRun),
+            progress,
+            cancellationToken).ConfigureAwait(false);
+
+        var code = MapPackageRestoreExit(result);
+        if (invocation.Json)
+        {
+            WriteJson(stdout, new
+            {
+                ok = code == ExitCodes.Success,
+                operationId = result.OperationId,
+                outcome = result.Outcome.ToString(),
+                dryRun = invocation.DryRun,
+                verified = result.Verified,
+                rolledBack = result.RolledBack,
+                restartRequired = result.RequiresRestart,
+                backupDir = result.BackupDir,
+                rollbackPoint = result.RollbackPointPath,
+                failure = result.Failure is null
+                    ? null
+                    : new
+                    {
+                        kind = result.Failure.Kind.ToString(),
+                        message = result.Failure.Message,
+                        detail = result.Failure.Detail,
+                        manualAction = result.Failure.ManualAction,
+                        canRetryWithNetwork = result.Failure.CanRetryWithNetwork,
+                    },
+                messages = result.Messages,
+                steps = result.Plan.OrderedSteps.Select(step => new
+                {
+                    order = step.Order,
+                    kind = step.Kind.ToString(),
+                    status = step.Status.ToString(),
+                    step.Skip,
+                    step.ExitCode,
+                    step.Error,
+                }).ToList(),
+            });
+        }
+        else
+        {
+            stdout.WriteLine($"包级恢复：{OutcomeLabel(result.Outcome)}");
+            stdout.WriteLine($"操作 ID   ：{result.OperationId}");
+            if (!string.IsNullOrWhiteSpace(result.Plan.SnapshotId)) stdout.WriteLine($"快照      ：{result.Plan.SnapshotId}");
+            foreach (var message in result.Messages) stdout.WriteLine("  " + message);
+            if (!string.IsNullOrWhiteSpace(result.BackupDir)) stdout.WriteLine($"写前备份  ：{result.BackupDir}");
+            if (!string.IsNullOrWhiteSpace(result.RollbackPointPath)) stdout.WriteLine($"回滚点    ：{result.RollbackPointPath}");
+            stdout.WriteLine($"校验      ：{(result.Verified ? "通过" : "未通过")}");
+            if (result.RolledBack) stdout.WriteLine("已回滚本次写入（profile 保持操作前状态）。");
+            if (result.RequiresRestart) stdout.WriteLine("请重启 DSH，Loom 会按首启判据检查结果。");
+            if (!string.IsNullOrWhiteSpace(result.Failure?.ManualAction)) stdout.WriteLine("人工入口  ：" + result.Failure!.ManualAction);
+            if (result.Outcome == OperationOutcome.Failed && result.Failure?.Kind == PackageRestoreFailureKind.Precondition
+                && result.OperationId.Length > 0 && result.Messages.Any(message => message.Contains("未启用", StringComparison.Ordinal)))
+            {
+                stdout.WriteLine("提示      ：在“设置 → 更新与兼容 → 包级恢复”里打开开关，或把 config.json 的 packageRestoreEnabled 设为 true。");
+            }
+        }
+
+        return code;
+    }
+
+    private async Task<int> RecoveryRollbackAsync(
+        CliInvocation invocation,
+        TextWriter stdout,
+        TextWriter stderr,
+        CancellationToken cancellationToken)
+    {
+        var opId = invocation.Positionals.Count > 1 ? invocation.Positionals[1].Trim() : "";
+        if (string.IsNullOrWhiteSpace(opId))
+        {
+            return Error(
+                invocation,
+                stdout,
+                stderr,
+                "recovery rollback 缺少 opId（用法：loom-dsh recovery rollback <opId>；opId 见 restore-backup 目录或报告）。",
+                ExitCodes.Failed);
+        }
+
+        // --dry-run：只校验回滚点是否可用（离线回滚本身会写 profile，必须显式执行）。
+        if (invocation.DryRun)
+        {
+            var canRollback = _loom.CanRollbackPackageOp(opId);
+            if (invocation.Json)
+            {
+                WriteJson(stdout, new { ok = canRollback, opId, canRollback, dryRun = true });
+            }
+            else
+            {
+                stdout.WriteLine($"opId      ：{opId}");
+                stdout.WriteLine($"可回滚    ：{(canRollback ? "是（备份与哈希校验通过）" : "否（备份缺失/损坏）")}");
+                stdout.WriteLine("（演练：未恢复文件、未执行离线 install）");
+            }
+
+            return canRollback ? ExitCodes.Success : ExitCodes.NeedsManual;
+        }
+
+        var result = await _loom.RollbackPackageOpAsync(opId, cancellationToken).ConfigureAwait(false);
+        var code = MapRollbackExit(result);
+
+        if (invocation.Json)
+        {
+            WriteJson(stdout, new
+            {
+                ok = code == ExitCodes.Success,
+                opId = result.OpId,
+                outcome = result.Outcome.ToString(),
+                verified = result.Verified,
+                backupDir = result.BackupDir,
+                installExitCode = result.InstallExitCode,
+                restoredFiles = result.RestoredFiles,
+                failure = result.Failure is null
+                    ? null
+                    : new
+                    {
+                        kind = result.Failure.Kind.ToString(),
+                        message = result.Failure.Message,
+                        detail = result.Failure.Detail,
+                        manualAction = result.Failure.ManualAction,
+                    },
+                messages = result.Messages,
+            });
+        }
+        else
+        {
+            stdout.WriteLine($"离线回滚：{OutcomeLabel(result.Outcome)}");
+            stdout.WriteLine($"opId      ：{result.OpId}");
+            foreach (var message in result.Messages) stdout.WriteLine("  " + message);
+            if (result.RestoredFiles.Count > 0) stdout.WriteLine("已恢复    ：" + string.Join("、", result.RestoredFiles));
+            if (!string.IsNullOrWhiteSpace(result.BackupDir)) stdout.WriteLine($"备份目录  ：{result.BackupDir}");
+            stdout.WriteLine($"校验      ：{(result.Verified ? "通过" : "未通过")}");
+            if (!string.IsNullOrWhiteSpace(result.Failure?.ManualAction)) stdout.WriteLine("人工入口  ：" + result.Failure!.ManualAction);
+        }
+
+        return code;
+    }
+
+    private static PackageRestoreRequest BuildPackageRestoreRequest(CliInvocation invocation, bool dryRun) => new()
+    {
+        // 只在“计划层”用 snapshotId 作为快照提示（真正的 manifest 由服务加载并校验）。
+        Plan = new PackageRestorePlan { SnapshotId = invocation.SnapshotId ?? "" },
+        DryRun = dryRun,
+        Force = invocation.Force,
+        // 联网回退必须逐次同意：CLI 不提供该开关，保持只走离线（与设计 §12.5 一致）。
+        AllowNetworkFallback = false,
+    };
+
+    private static object ToPlanJson(PackageRestorePlan plan) => new
+    {
+        operationId = plan.OperationId,
+        snapshotId = plan.SnapshotId,
+        snapshotDir = plan.SnapshotDir,
+        profileDir = plan.ProfileDir,
+        isBlocked = plan.IsBlocked,
+        requiresFullExit = plan.RequiresFullExit,
+        offlineOnly = plan.OfflineOnly,
+        summary = plan.Summary,
+        notes = plan.Notes,
+        expectedBundles = plan.ExpectedBundles,
+        expectedDependencies = plan.ExpectedDependencies,
+        blockingFailure = plan.BlockingFailure is null
+            ? null
+            : new
+            {
+                kind = plan.BlockingFailure.Kind.ToString(),
+                message = plan.BlockingFailure.Message,
+                detail = plan.BlockingFailure.Detail,
+                manualAction = plan.BlockingFailure.ManualAction,
+            },
+        preconditions = plan.Preconditions.Select(item => new
+        {
+            code = item.Code.ToString(),
+            item.Satisfied,
+            item.Detail,
+            item.ManualAction,
+        }).ToList(),
+        steps = plan.OrderedSteps.Select(step => new
+        {
+            order = step.Order,
+            kind = step.Kind.ToString(),
+            description = step.Description,
+            targetFile = step.TargetFile,
+            args = step.Args,
+            displayCommand = step.DisplayCommand,
+            skip = step.Skip,
+            skipReason = step.SkipReason,
+            requiresFullExit = step.RequiresFullExit,
+            timeoutSeconds = step.TimeoutSeconds,
+            beforeSha256 = step.BeforeSha256,
+            afterSha256 = step.AfterSha256,
+        }).ToList(),
+    };
+
+    private static int MapPackageRestoreExit(PackageRestoreResult result) => result.Outcome switch
+    {
+        OperationOutcome.Succeeded or OperationOutcome.DryRun or OperationOutcome.Skipped => ExitCodes.Success,
+        OperationOutcome.NeedsManual => result.Failure?.Kind == PackageRestoreFailureKind.ProfileBusy
+            ? ExitCodes.Busy
+            : ExitCodes.NeedsManual,
+        OperationOutcome.Cancelled => ExitCodes.Failed,
+        _ => result.Failure is null ? ExitCodes.Failed : MapRestoreFailure(result.Failure.Kind),
+    };
+
+    private static int MapRollbackExit(OfflineRollbackResult result) => result.Outcome switch
+    {
+        OperationOutcome.Succeeded or OperationOutcome.DryRun => ExitCodes.Success,
+        OperationOutcome.NeedsManual => result.Failure?.Kind == PackageRestoreFailureKind.ProfileBusy
+            ? ExitCodes.Busy
+            : ExitCodes.NeedsManual,
+        OperationOutcome.Cancelled => ExitCodes.Failed,
+        _ => result.Failure is null ? ExitCodes.Failed : MapRestoreFailure(result.Failure.Kind),
+    };
+
+    /// <summary>包级恢复/回滚失败分类 → 退出码（不可用 3 / 忙 4 / 待人工 2 / 失败 1）。</summary>
+    private static int MapRestoreFailure(PackageRestoreFailureKind kind) => kind switch
+    {
+        PackageRestoreFailureKind.SnapshotInputMissing
+            or PackageRestoreFailureKind.CliMissing
+            or PackageRestoreFailureKind.UnsupportedSpec => ExitCodes.Unavailable,
+        PackageRestoreFailureKind.ProfileBusy => ExitCodes.Busy,
+        PackageRestoreFailureKind.OfflineCacheMissing
+            or PackageRestoreFailureKind.Precondition
+            or PackageRestoreFailureKind.Permission
+            or PackageRestoreFailureKind.Disk
+            or PackageRestoreFailureKind.BackupCorrupt
+            or PackageRestoreFailureKind.RollbackFailed
+            or PackageRestoreFailureKind.FirstStartFailed => ExitCodes.NeedsManual,
+        _ => ExitCodes.Failed,
+    };
+
     private async Task<int> ReportAsync(
         CliInvocation invocation,
         TextWriter stdout,
@@ -391,7 +908,7 @@ public sealed class CliRunner
     {
         if (invocation.UpdateApply && invocation.UpdateDownload)
         {
-            return Error(invocation, stdout, stderr, "不能同时指定 --download 与 --apply。", ExitCodes.Busy);
+            return Error(invocation, stdout, stderr, "不能同时指定 --download 与 --apply。", ExitCodes.Failed);
         }
 
         var updates = _loom.Updates;
@@ -474,6 +991,8 @@ public sealed class CliRunner
                 releaseUrl = updates.ReleaseUrl,
                 downloadPath = updates.SetupDownloadPath,
                 downloaded,
+                integrityVerified = updates.IntegrityVerified,
+                integrity = updates.IntegrityText,
                 message = updates.MessageText,
                 error = updates.ErrorText,
             });
@@ -510,6 +1029,7 @@ public sealed class CliRunner
             if (downloaded)
             {
                 stdout.WriteLine($"安装包已下载：{updates.SetupDownloadPath}");
+                stdout.WriteLine($"完整性校验：{updates.IntegrityText ?? "未校验"}");
                 stdout.WriteLine("可在设置页点“重启并更新”（或退出托盘后运行 loom-dsh update --apply）。");
             }
         }
@@ -666,6 +1186,16 @@ public sealed class CliRunner
                            loom-dsh check [--json]           检查插件兼容性/恢复证据
                            loom-dsh restore [--dry-run] [--force] [--snapshot <id>]
                                                              文件级还原（--dry-run 只出计划）
+                           loom-dsh upgrade [--pkg <name>] [--dry-run] [--json] [--allow-prerelease]
+                                                             策略 A：把插件升级到与目标 dshVersion 兼容的版本
+                                                             （--save-exact；写前先备份到 restore-backup）；
+                                                             不带 --pkg 时按最近一次检查结果批量处理不兼容插件
+                                                             （每次最多 3 个；--dry-run 只出决策与命令）
+                           loom-dsh recovery plan|apply|rollback [--snapshot <id>] [--dry-run] [--json]
+                                                             包级恢复：备份 → 写 package.json/pnpm-lock.yaml →
+                                                             install --offline --frozen-lockfile → 校验；
+                                                             rollback <opId> 按 opId 离线完整回滚
+                                                             （需要 DSH 完全退出；Loom 不会结束进程）
                            loom-dsh report [--json]          输出最近一次报告
                            loom-dsh doctor [--json]          环境体检
                            loom-dsh migrate-data [--dry-run] [--json] [--remove-source]

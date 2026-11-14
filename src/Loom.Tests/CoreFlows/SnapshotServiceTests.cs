@@ -214,6 +214,86 @@ public sealed class SnapshotServiceTests
     }
 
     [Fact]
+    public async Task FailedWriteRemovesPartialSnapshotDirectory()
+    {
+        using var sandbox = new LoomSandbox();
+        SeedProfile(sandbox);
+        var service = new SnapshotService(sandbox.Paths, Logger);
+        var manifest = await service.CaptureAsync(sandbox.Installation, SnapshotTrigger.Manual, false);
+        var snapshotDir = sandbox.Paths.SnapshotDir(manifest.Id);
+
+        // 独占打开 package.json，使 WriteAsync 在复制 profile 文件时抛 IOException；
+        // 此时 snapshot 目录已经创建，必须被清理掉，不能留下没有 snapshot.json 的半成品。
+        using (new FileStream(
+                   sandbox.ProfilePath(DshDefaults.ManifestFile),
+                   FileMode.Open,
+                   FileAccess.Read,
+                   FileShare.None))
+        {
+            // 共享冲突在 Windows 上可能表现为 IOException/UnauthorizedAccessException，两者都算写入失败。
+            await Assert.ThrowsAnyAsync<Exception>(
+                () => service.WriteAsync(manifest, sandbox.Paths, new LoomConfig()));
+        }
+
+        Assert.False(Directory.Exists(snapshotDir));
+        Assert.False(File.Exists(Path.Combine(snapshotDir, "snapshot.json")));
+        Assert.Empty(Directory.GetDirectories(sandbox.Paths.SnapshotsDir));
+        Assert.Empty(Directory.GetDirectories(sandbox.Paths.SnapshotsDir, "corrupt-*"));
+    }
+
+    [Fact]
+    public async Task QuotaKeepsNewestSnapshotPerDshVersion()
+    {
+        using var sandbox = new LoomSandbox();
+        SeedProfile(sandbox);
+        var service = new SnapshotService(sandbox.Paths, Logger);
+        var baseTime = DateTimeOffset.Now.AddHours(-1);
+
+        async Task<SnapshotRef> Take(string id, int minutes, string dshVersion)
+        {
+            var manifest = new SnapshotManifest
+            {
+                Id = id,
+                TakenAt = baseTime.AddMinutes(minutes),
+                Trigger = SnapshotTrigger.Auto,
+                AppVersion = "0.2.2-rc.1",
+                DshVersion = dshVersion,
+                ProfileDir = sandbox.ProfileDir,
+            };
+            manifest.Profile.Bundles.Add(TestData.Bundle("@deepseek-ai/dsh-base"));
+            return await service.WriteAsync(manifest, sandbox.Paths, new LoomConfig());
+        }
+
+        var v1Old = await Take("v1-old", 10, "0.1.0");
+        var v1New = await Take("v1-new", 20, "0.1.0");
+        var v2Old = await Take("v2-old", 30, "0.2.0");
+        var v2New = await Take("v2-new", 40, "0.2.0");
+        var v3Old = await Take("v3-old", 50, "0.3.0");
+        var v3New = await Take("v3-new", 60, "0.3.0");
+        _ = v1Old;
+        _ = v2Old;
+        _ = v3Old;
+
+        // KeepSnapshots=1 只保护最新一份；quota 远小于总大小，必须从最旧开始淘汰，
+        // 但每个 dshVersion 的最新一份（v1-new/v2-new/v3-new）不能被 quota 删掉。
+        var removed = await service.RetainAsync(
+            sandbox.Paths,
+            new LoomState { LastSnapshot = v3New },
+            new LoomConfig { KeepSnapshots = 1, MaxSnapshotBytes = 1 });
+
+        Assert.Equal(3, removed);
+        foreach (var kept in new[] { "v1-new", "v2-new", "v3-new" })
+        {
+            Assert.True(Directory.Exists(sandbox.Paths.SnapshotDir(kept)), kept + " 必须保留");
+        }
+
+        foreach (var deleted in new[] { "v1-old", "v2-old", "v3-old" })
+        {
+            Assert.False(Directory.Exists(sandbox.Paths.SnapshotDir(deleted)), deleted + " 应被淘汰");
+        }
+    }
+
+    [Fact]
     public async Task CaptureWithoutManifestThrows()
     {
         using var sandbox = new LoomSandbox();

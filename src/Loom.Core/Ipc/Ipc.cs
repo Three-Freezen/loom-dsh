@@ -5,6 +5,13 @@ namespace Loom.Core.Ipc;
 /// <summary>Single-instance coordination for the tray + CLI pair.</summary>
 public static class SingleInstance
 {
+    // 注意（P2-R2）：这两个名字**有意不按数据根派生**。
+    //   * <c>Local\LoomForDsh-Instance-v1</c> 是“人机单实例”语义：安装器 installer\loom-dsh.iss 的
+    //     AppMutex 必须与它同名，Inno 才能在升级/卸载前识别正在运行的托盘并等待退出；
+    //     改名字会让安装器看不到已有实例，直接覆盖正在运行的程序文件。
+    //   * CLI 也用它判断“是否有托盘在运行”（IsTrayRunning 无数据根参数），随后靠 tray-root.json
+    //     握手判断是否同根。跨会话/跨用户的人机单实例不在这里解决（同一用户在不同会话各开一个
+    //     托盘是允许的）；真正的写操作互斥由 OperationGate 的“数据根派生 mutex + 文件锁”保证。
     public const string MutexName = "Local\\LoomForDsh-Instance-v1";
     public const string ShowEventName = "Local\\LoomForDsh-Show-v1";
 
@@ -88,6 +95,28 @@ public sealed class QueueResponse
 /// <summary>CLI side of the file-based command queue (design 7.4).</summary>
 public sealed class QueueClient
 {
+    /// <summary>队列等待上限的环境变量覆盖（秒，10–7200）。</summary>
+    public const string TimeoutEnvironmentVariable = "LOOM_QUEUE_TIMEOUT_SECONDS";
+
+    /// <summary>
+    /// 默认等待上限：**20 分钟**（原为 5 分钟）。慢盘/大 profile 上托盘执行一次快照或还原就可能超过
+    /// 5 分钟，客户端会在托盘仍在正常工作时误报 Busy(4)。正常命令仍是秒级返回，20 分钟只影响
+    /// “托盘卡住”时的最坏等待；可用 <see cref="TimeoutEnvironmentVariable"/> 覆盖。
+    /// 预计可能超过该上限的 upgrade/recovery 不入队（直连 + 跨进程门控，见 TrayCommandRouting）。
+    /// </summary>
+    public static readonly TimeSpan DefaultTimeout = ResolveDefaultTimeout();
+
+    private static TimeSpan ResolveDefaultTimeout()
+    {
+        var raw = System.Environment.GetEnvironmentVariable(TimeoutEnvironmentVariable);
+        if (int.TryParse(raw, out var seconds) && seconds is >= 10 and <= 7200)
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return TimeSpan.FromMinutes(20);
+    }
+
     private readonly LoomPaths _paths;
 
     public QueueClient(LoomPaths paths)
@@ -153,6 +182,14 @@ public sealed class QueueClient
 /// <summary>Tray side of the file-based command queue: executes CLI requests on the UI process.</summary>
 public sealed class QueueServer : IDisposable
 {
+    /// <summary>
+    /// P2-R2：队列泵锁文件名。托盘单实例互斥量（<see cref="SingleInstance.MutexName"/>）是
+    /// <c>Local\</c> 会话级：便携版共享目录跨用户、或 session 0 计划任务与交互托盘同 data root 时，
+    /// 两个托盘会同时泵同一队列。这里用数据根队列目录下的 <see cref="FileShare.None"/> 文件锁
+    /// 补齐（跨会话有效、按数据根隔离、进程退出自动释放）；不同数据根天然不互相阻塞。
+    /// </summary>
+    public const string WorkerLockFileName = "queue.worker.lock";
+
     private readonly LoomPaths _paths;
     private readonly Func<string[], CancellationToken, Task<CliProcessResult>> _executor;
     private readonly object _gate = new();
@@ -164,6 +201,30 @@ public sealed class QueueServer : IDisposable
     {
         _paths = paths;
         _executor = executor;
+    }
+
+    /// <summary>本服务器使用的队列泵锁文件（测试/诊断可见）。</summary>
+    public string WorkerLockPath => WorkerLockPathFor(_paths);
+
+    internal static string WorkerLockPathFor(LoomPaths paths) =>
+        Path.Combine(paths.QueueDir, WorkerLockFileName);
+
+    /// <summary>尝试独占打开队列泵锁；已被其它进程/会话持有时返回 null（本次 tick 直接让位）。</summary>
+    internal FileStream? TryAcquireWorkerLock()
+    {
+        try
+        {
+            Directory.CreateDirectory(_paths.QueueDir);
+            return new FileStream(
+                WorkerLockPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public void Start()
@@ -184,6 +245,18 @@ public sealed class QueueServer : IDisposable
         {
             if (_processing) return;
             _processing = true;
+        }
+
+        // P2-R2：同一数据根只允许一个托盘进程泵队列；拿不到锁说明另一个会话已经在处理。
+        FileStream? workerLock = TryAcquireWorkerLock();
+        if (workerLock is null)
+        {
+            lock (_gate)
+            {
+                _processing = false;
+            }
+
+            return;
         }
 
         try
@@ -208,6 +281,15 @@ public sealed class QueueServer : IDisposable
         }
         finally
         {
+            try
+            {
+                workerLock.Dispose();
+            }
+            catch
+            {
+                // best effort
+            }
+
             lock (_gate)
             {
                 _processing = false;
@@ -230,9 +312,9 @@ public sealed class QueueServer : IDisposable
                     return null;
                 }
 
-                if (File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddMinutes(-5))
+                if (File.GetLastWriteTimeUtc(file) < DateTime.UtcNow - QueueClient.DefaultTimeout)
                 {
-                    // stale request from a killed CLI
+                    // stale request from a killed CLI（等待上限已过，客户端早已放弃）
                     path = file;
                     return null;
                 }
@@ -253,7 +335,8 @@ public sealed class QueueServer : IDisposable
     {
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            // 与客户端等待上限对齐：否则客户端等 20 分钟、服务端 10 分钟就先取消了。
+            using var cts = new CancellationTokenSource(QueueClient.DefaultTimeout);
             return await _executor(request.Args, cts.Token).ConfigureAwait(false);
         }
         catch (Exception exception)

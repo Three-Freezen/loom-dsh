@@ -60,7 +60,11 @@ public sealed class TrayHost : IDisposable
 
     // ------------------------------------------------------------------ lifecycle
 
-    public void Start()
+    /// <param name="suppressStartupSideEffects">
+    /// P3-R7：<c>ui render</c> 模式为 true —— 跳过“消费上次升级的安装包清理标记”和“启动自动检查更新”
+    /// （一个删文件、一个联网/写 LastUpdateCheckUtc），保持离屏渲染无副作用；正常托盘启动为 false。
+    /// </param>
+    public void Start(bool suppressStartupSideEffects = false)
     {
         if (_started || _disposed) return;
         _started = true;
@@ -75,8 +79,12 @@ public sealed class TrayHost : IDisposable
         _ = RefreshStatusAsync();
 
         // 应用更新：先消费上次静默升级留下的安装包清理标记，再做启动后台检查（24h 节流）。
-        Loom.Updates.ConsumePendingSetupCleanup();
-        _ = AutoCheckUpdatesAsync();
+        // P3-R7：render 模式两者都跳过，避免截图流程删文件/联网。
+        if (!suppressStartupSideEffects)
+        {
+            Loom.Updates.ConsumePendingSetupCleanup();
+            _ = AutoCheckUpdatesAsync();
+        }
     }
 
     private void CreateTrayIcon()
@@ -766,6 +774,7 @@ public sealed class TrayHost : IDisposable
     /// <summary>
     /// Logs a window-open failure and tells the user what happened. Previously such exceptions were
     /// swallowed by the dispatcher handler, so the window simply never appeared.
+    /// P2-6：非交互会话（服务化启动/断开的会话/session 0）只写日志、不弹模态框。
     /// </summary>
     private void ReportWindowFailure(string what, Exception exception)
     {
@@ -778,18 +787,9 @@ public sealed class TrayHost : IDisposable
             // best effort
         }
 
-        try
-        {
-            MessageBox.Show(
-                $"{what}窗口打开失败：\n{exception.Message}\n\n详细信息已写入日志（数据目录\\logs\\loom.log）。",
-                "Loom for DSH",
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
-        }
-        catch
-        {
-            // best effort: never let a failure report crash the tray
-        }
+        UiInteraction.ShowWarning(
+            $"{what}窗口打开失败：\n{exception.Message}\n\n详细信息已写入日志（数据目录\\logs\\loom.log）。",
+            "Loom for DSH");
     }
 
     private async Task RollbackAsync()
@@ -862,9 +862,10 @@ public sealed class TrayHost : IDisposable
     // ------------------------------------------------------------------ preview render
 
     /// <summary>
-    /// Debug/smoke hook used by <c>loom-dsh ui render</c>: renders popup/settings/wizard/tray-menu in
-    /// dark and light to PNG under <c>outputDir ?? Paths.DataRoot\ui-preview</c>, then restores the
-    /// user's theme.
+    /// Debug/smoke hook used by <c>loom-dsh ui render</c>: renders the five pages in dark/light plus a
+    /// full-height “更新与兼容” page (policy A + package restore cards below the fold) to PNG under
+    /// <c>outputDir ?? Paths.DataRoot\ui-preview</c>, then restores the user's theme. Exactly
+    /// <see cref="UiSnapshotCatalog.ExpectedCount"/> files are produced; a missing/empty one fails the render.
     /// </summary>
     public IReadOnlyList<string> RenderSnapshots(string? outputDir = null)
     {
@@ -915,6 +916,18 @@ public sealed class TrayHost : IDisposable
                     background,
                     Path.Combine(directory, $"settings-update-{theme}.png")));
 
+                // P3-R6 / R6: the same page at full content height, so the second-phase cards
+                // (“插件自动升级（策略 A）” and “包级恢复（实验性）”) are inside the PNG instead of
+                // below the 640px fold. Runtime windows keep scrolling at 640px.
+                var compatViewModel = new SettingsViewModel(Loom);
+                compatViewModel.Load(Loom.Config, status);
+                var compatView = new SettingsView { DataContext = compatViewModel };
+                compatView.FitToFullContentHeight();
+                results.Add(UiPreviewRenderer.Render(
+                    compatView,
+                    background,
+                    Path.Combine(directory, $"settings-compat-{theme}.png")));
+
                 var firstRunViewModel = new FirstRunViewModel(Loom);
                 firstRunViewModel.ApplyStatus(status);
                 results.Add(UiPreviewRenderer.Render(
@@ -931,6 +944,21 @@ public sealed class TrayHost : IDisposable
         finally
         {
             ThemeManager.Apply(requestedTheme);
+        }
+
+        // 产物自检：固定清单 12 张、文件名唯一且每个文件非空（UiPreviewRenderer 已校验 PNG 头）。
+        var expected = UiSnapshotCatalog.FileNames;
+        if (results.Count != UiSnapshotCatalog.ExpectedCount)
+        {
+            throw new InvalidOperationException(
+                $"界面预览快照数量不符：预期 {UiSnapshotCatalog.ExpectedCount} 张，实际 {results.Count} 张。");
+        }
+
+        var produced = results.Select(Path.GetFileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = expected.Where(name => !produced.Contains(name)).ToList();
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException("界面预览缺少快照：" + string.Join("、", missing));
         }
 
         return results;

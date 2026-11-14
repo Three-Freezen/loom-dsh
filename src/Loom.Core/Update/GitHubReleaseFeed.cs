@@ -33,6 +33,12 @@ internal static class GitHubReleaseFeed
     internal const string RepoName = "loom-dsh";
     internal const string AssetName = AppInstallInfo.SetupAssetName;
 
+    /// <summary>
+    /// 随安装包一起发布的 SHA256 清单（固定名，位于 <c>releases/latest/download/</c> 下）。
+    /// 由发布脚本生成（每行 <c>&lt;sha256&gt;  &lt;文件名&gt;</c>）；缺失时下载仍继续但标记“未校验”。
+    /// </summary>
+    internal const string ChecksumsAssetName = "SHA256SUMS.txt";
+
     /// <summary>Smallest plausible setup asset. Guards against HTML error pages / truncated downloads.</summary>
     internal const long MinimumAssetBytes = 1L * 1024 * 1024;
 
@@ -40,6 +46,9 @@ internal static class GitHubReleaseFeed
     internal static string ReleasesLatestUrl => RepoUrl + "/releases/latest";
     internal static string ReleasesApiUrl => $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases/latest";
     internal static string AssetUrl => $"{ReleasesLatestUrl}/download/{AssetName}";
+
+    /// <summary><c>releases/latest/download/SHA256SUMS.txt</c>。</summary>
+    internal static string ChecksumsUrl => $"{ReleasesLatestUrl}/download/{ChecksumsAssetName}";
 
     private static readonly HttpClient RedirectlessHttp = CreateHttp(allowAutoRedirect: false);
     private static readonly HttpClient PlainHttp = CreateHttp(allowAutoRedirect: true);
@@ -172,6 +181,25 @@ internal static class GitHubReleaseFeed
         {
             TryDelete(partPath);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// 下载 SHA256SUMS.txt（P2-3）。任何失败（404/断网/网关拦截）都返回 null——离线场景下
+    /// 下载流程继续，但会把安装包标记为“未校验”。绝不抛出，避免让“拿不到清单”变成下载失败。
+    /// </summary>
+    internal static async Task<string?> TryDownloadChecksumsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await PlainHttp.GetAsync(ChecksumsUrl, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+            var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch
+        {
+            return null;
         }
     }
 

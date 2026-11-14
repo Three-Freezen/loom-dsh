@@ -13,7 +13,7 @@ public static class UiStrings
     public const string ProductName = "LOOM";
     public const string ProductTagline = "DSH 插件守护";
     public const string ProductFullName = "Loom for DSH";
-    public const string ToolVersionFallback = "0.1.1";
+    public const string ToolVersionFallback = "0.2.0";
 
     // 托盘状态
     public const string StatusNormal = "正常";

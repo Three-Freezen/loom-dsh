@@ -16,8 +16,17 @@ public sealed class AppServices : IDisposable
     private bool _disposed;
 
     public AppServices(LoomOptions options)
+        : this(options, operationGate: null)
     {
-        _loom = LoomServiceFactory.Create(options);
+    }
+
+    /// <param name="options">启动参数。</param>
+    /// <param name="operationGate">
+    /// CLI 长操作（upgrade/recovery）传入已预占跨进程门的实例；托盘/普通命令传 null。
+    /// </param>
+    public AppServices(LoomOptions options, IOperationGate? operationGate)
+    {
+        _loom = LoomServiceFactory.Create(options, operationGate);
         QueueServer = new QueueServer(_loom.Paths, ExecuteCliAsync);
     }
 
@@ -49,7 +58,8 @@ public sealed class AppServices : IDisposable
         var invocation = CliParser.Parse(args);
         if (invocation.Error is not null)
         {
-            return new CliProcessResult { ExitCode = ExitCodes.Busy, StdErr = invocation.Error };
+            // 参数错误统一为 Failed(1)，与直接 CLI 的 ExitCodes 语义一致（不再误报 Busy(4)）。
+            return new CliProcessResult { ExitCode = ExitCodes.Failed, StdErr = invocation.Error };
         }
 
         if (invocation.IsUi)

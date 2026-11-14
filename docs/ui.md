@@ -10,7 +10,7 @@
 
 | 路径 | 作用 |
 |---|---|
-| `src/Loom/Tray/TrayHost.cs` | 托盘宿主：`NotifyIcon` 生命周期、状态图标、右键菜单宿主、弹层/设置/向导/报告窗口、气泡通知、`RenderSnapshots()`（8 页） |
+| `src/Loom/Tray/TrayHost.cs` | 托盘宿主：`NotifyIcon` 生命周期、状态图标、右键菜单宿主、弹层/设置/向导/报告窗口、气泡通知、`RenderSnapshots()`（12 张） |
 | `src/Loom/Views/TrayMenuView.xaml` | 托盘右键菜单内容（WPF 自绘卡片；预渲染与窗口共用） |
 | `src/Loom/Views/TrayMenuWindow.xaml` | 托盘右键菜单窗口：无边框透明置顶、淡入、Esc/方向键/失焦关闭、「先关菜单再执行命令」时序 |
 | `src/Loom/ViewModels/TrayMenuViewModel.cs` | 菜单项/命令/忙碌禁用/危险项（退出）模型；`TrayMenuActions` 由 TrayHost 注入 |
@@ -43,7 +43,7 @@ App / Program / AppServices 契约保持不变：`new TrayHost(AppServices)`、`
 - 六个分区：
   1. **通用**：主题（跟随系统/深色/浅色，切换即预览）、开机自启、启动后自动快照、数据目录（只读 + 打开）。
   2. **备份与还原**：更新后自动文件级还原、更新前完整快照、保留份数（3/5/10/20）、快照配额 GB（`MaxSnapshotBytes`）、当前占用 + 打开备份目录、还原安全说明。
-  3. **更新与兼容**：兼容策略 A/B/C 单选（A 为默认）、更新后自动恢复、范围 A 说明。
+  3. **更新与兼容**：兼容策略 A/B/C 单选（A 为默认）、更新后自动恢复、「插件自动升级（策略 A）」卡片（总开关 / 允许 major / 允许预发布）、「包级恢复（实验性）」卡片（启用包级恢复 / 允许联网回退 / 回滚上一次包级操作 + 最近可回滚 opId）、范围 A 说明。
   4. **通知**：气泡通知开关、静默时段开关 + 起止时间（HH:mm 校验）、通知方式说明。
   5. **存储**：数据目录/配置文件/日志目录（只读 + 打开）、快照占用、范围说明 + 重新定位。
   6. **关于**：品牌、工具/应用/运行时版本、数据目录、能力与边界、打开数据/日志目录。
@@ -137,7 +137,7 @@ App / Program / AppServices 契约保持不变：`new TrayHost(AppServices)`、`
 - 基础 ICO 用 `AppServices.OpenEmbedded("Loom.Icons.light.ico"/"Loom.Icons.dark.ico")`（缺失回退输出目录 `Assets/Icons`）。ICO 是 PNG 压缩帧，GDI+ 直接画会花屏，因此 `TrayIconFactory` 自行解析 ICO 目录取 32px PNG 帧再用 GDI+ 合成状态点；`Bitmap.GetHicon()` 得到的 HICON 在替换时显式 `DestroyIcon`，避免句柄泄漏。
 - 托盘图标 variant 由 `ThemeManager.EffectiveTheme` 决定（深色主题 = 深底 ico，浅色 = 浅底 ico），`ThemeChanged` 时 `ReplaceIcon(force:true)` 立即重取；窗口图标走 `AppIcon`、软件内 `LogoMark` 走 DynamicResource，三者同源同主题。
 - `NotifyIcon.Text` = 当前 headline，截断到 63 字符。鼠标事件：左键 → 弹层开关（`ShowPopup()`）；双击 → 弹层开关；右键 → WPF 自绘菜单 `TrayMenuWindow`（见 §2.5）。忙碌时菜单里的「立即快照/检查兼容性」禁用；旧 `ContextMenuStrip` 相关字段与 `ShowImageMargin/Font` 设置已删除。
-- 通知：`Loom.NotificationRaised` → `Notify()`；遵守 `Config.Notifications`、`QuietHoursEnabled` 与 `QuietHoursStart/End`（支持 23:00–08:00 跨午夜），按 `EventId` 内存 `HashSet` 去重；`ShowBalloonTip(4000, title, message, Info/Warning/Error)`；点击气泡打开对应报告（`NotificationPresenter` 本轮未改动）。
+- 通知：`Loom.NotificationRaised` → `Notify()`；遵守 `Config.Notifications`、`QuietHoursEnabled` 与 `QuietHoursStart/End`（支持 23:00–08:00 跨午夜）；去重按 eventId：`state.json` 的 `recentNotifiedEventIds` 保留最近 **20 个**（跨进程/重启），托盘层再用有上限的 FIFO 集合兜底，旧字段 `lastNotifiedEventId` 兼容并入；`ShowBalloonTip(4000, title, message, Info/Warning/Error)`；点击气泡打开对应报告。
 - 通知策略只为 UI 层兜底：`LoomService` 仍然持久化 `LastNotifiedEventId`。
 
 ---
@@ -146,9 +146,11 @@ App / Program / AppServices 契约保持不变：`new TrayHost(AppServices)`、`
 
 实现：`TrayHost.RenderSnapshots(outputDir = null)`：
 - 输出目录 `outputDir ?? LoomPaths.DataRoot\ui-preview\`（自动创建）。
-- 深/浅主题各渲染 4 页，共 8 个 PNG：`popup-{theme}.png` / `settings-{theme}.png` / `wizard-{theme}.png` / `tray-menu-{theme}.png`（theme = dark/light），返回绝对路径列表。
+- 深/浅主题各渲染 6 页，共 **12 张** PNG：`popup-{theme}.png` / `settings-{theme}.png` / `settings-update-{theme}.png` / `settings-compat-{theme}.png` / `wizard-{theme}.png` / `tray-menu-{theme}.png`（theme = dark/light），返回绝对路径列表。固定清单在 `UiSnapshotCatalog`（12 个唯一文件名），数量不符或缺文件即让 render 失败。
+- `settings-compat-*` 是**整页**快照：`SettingsView.FitToFullContentHeight()` 把控件高度扩到“更新与兼容”整页内容（运行时窗口仍是 640 高、内容滚动），从而把折叠线以下的「插件自动升级（策略 A）」与「包级恢复（实验性）」卡片纳入 PNG。
 - 页面为 `UserControl`（不依赖窗口），`UiPreviewRenderer` 先做两遍 Measure/Arrange（让绑定、ItemsControl 完成布局），再 `RenderTargetBitmap` 以 192 DPI（2x）渲染，四周留 40px 以便显示卡片阴影；页底用当前主题 `BgBrush`。
 - 渲染数据：优先使用真实安装信息（若托盘已解析），否则使用代表性演示数据（3 个插件 / 4 份快照 / 42.6 MB / 3 条活动），保证截图稳定且不触发 DSH 探测或快照。托盘菜单为 `TrayMenuViewModel.CreatePreview()`（真实菜单项数据、动作全部 no-op）。渲染结束会恢复用户主题。
+- `render` 是离屏模式：**跳过**“消费上次升级的安装包清理标记”和“启动自动检查更新”，也不启动命令队列与 15 秒定时器，避免截图流程删文件/联网/写 `lastUpdateCheckUtc`；渲染失败以非 0 退出（见 §11）。
 
 验证命令（数据目录必须在工作区内，DSH 沙箱不允许写 `%LOCALAPPDATA%\Loom`）：
 
@@ -157,13 +159,14 @@ cd D:\BS\Loom-DSH\src
 dotnet build Loom\Loom.csproj -p:UseSharedCompilation=false
 $exe='D:\BS\Loom-DSH\src\Loom\bin\Debug\net10.0-windows\win-x64\loom-dsh.exe'
 cmd /c "`"$exe`" ui render --data-root D:\BS\Loom-DSH\.tmp-ui-tray > out.txt 2> err.txt"   # 退出码 0
-Get-ChildItem D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview   # 10 张 PNG
+Get-ChildItem D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview   # 12 张 PNG
 ```
 
 注意：
 - 若有托盘实例在运行，`ui render` 会经命令队列转给旧托盘执行且**不会退出**；测试前先 `Get-Process loom-dsh` 并结束旧进程。用 `cmd /c` 包一层才能拿到 WinExe 的退出码（PowerShell 的 `&` 对 GUI 子系统进程不等待）。
-- 本轮 10 张产物位于 `D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview\`（构建产物目录不入库），已按 `read_image` 逐张核对 token 颜色/层级/菜单样式/LogoMark 深底浅字形，并复制到 `design/ui/impl-preview/`。
+- 本轮 12 张产物位于 `D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview\`（构建产物目录不入库），已按 `read_image` 逐张核对 token 颜色/层级/菜单样式/LogoMark 深底浅字形；其中 10 张已复制到 `design/ui/impl-preview/`，`settings-compat-*` 只留在构建产物目录。
   - 0.1.1 起新增 `settings-update-{dark,light}.png`：渲染「更新与兼容」页（应用更新卡片所在页），专门防住“只读属性被 TwoWay 绑定”这类编译期发现不了、运行期才炸的缺陷。
+  - 0.2.0 起新增 `settings-compat-{dark,light}.png`：同一页的**整页**高度快照，覆盖折叠线以下的「插件自动升级（策略 A）」与「包级恢复（实验性）」卡片。
 - 图标对照图由 `spike/tray-ui-harness`（gitignored）生成：`design/ui/impl-preview/icon-parity.png`（深/浅两行：LogoMark 96/48 + 托盘 ico 64/32/16 同屏对比，几何/配色一致）。
 
 ---
@@ -231,16 +234,19 @@ Get-ChildItem D:\BS\Loom-DSH\.tmp-ui-tray\ui-preview   # 10 张 PNG
 - 主题字典的位置/命名被 `ThemeManager` 按 `pack://application:,,,/<assembly>;component/Themes/*.xaml` 加载，重命名文件需同步 `ThemeManager`。
 - 若其他工作流需要新窗口/页面：页面实现为 `UserControl`（固定尺寸，`Width`/`Height`），窗口只做透明 chrome + 阴影边距；渲染器可直接复用 `UiPreviewRenderer.Render`。
 - 新文案请加到 `ViewModels/UiStrings.cs`，避免散落在 XAML。
-- **契约变更（task-6）**：`TrayHost` 不再创建 `System.Windows.Forms.ContextMenuStrip`；右键在 `NotifyIcon.MouseClick` 中处理。菜单是可复用的 `TrayMenuWindow(TrayMenuViewModel)`，命令通过 `TrayMenuActions` 记录注入（`OpenStatusPanel/Snapshot/Check/OpenReport/OpenSettings/OpenBackupFolder/Exit`）——预览与 harness 用 `TrayMenuActions.Preview`，不需要真实 `TrayHost`。`RenderSnapshots` 现在返回 **8** 个路径（新增 `tray-menu-dark/light.png`），调用方不要假设 6 个。
+- **契约变更（task-6）**：`TrayHost` 不再创建 `System.Windows.Forms.ContextMenuStrip`；右键在 `NotifyIcon.MouseClick` 中处理。菜单是可复用的 `TrayMenuWindow(TrayMenuViewModel)`，命令通过 `TrayMenuActions` 记录注入（`OpenStatusPanel/Snapshot/Check/OpenReport/OpenSettings/OpenBackupFolder/Exit`）——预览与 harness 用 `TrayMenuActions.Preview`，不需要真实 `TrayHost`。`RenderSnapshots` 现在返回 **12** 个路径（`tray-menu-*`、`settings-update-*`、`settings-compat-*` 各深浅两张），调用方不要假设 6/8/10 个。
 - **图标契约**：窗口图标统一用 `AppIcon.Current`（主题对应内嵌 ico 的 64px PNG 帧）；新增窗口请同样在创建时赋值并在 `ThemeManager.ThemeChanged` 时刷新（TrayHost 已对 Settings/FirstRun/Report 处理）。托盘图标底色用 `ThemeManager.IsDark` 决定，不要再调用 `DetectSystemTheme()` 单独判断。
 - **TrayMenuWindow 测试缝（可选构造参数）**：`diagnosticSink`（诊断行回调，TrayHost 传 `MenuDiagnostics` 把 WARN 落日志）、`foregroundSetter`（默认 P/Invoke `SetForegroundWindow`，harness 注入 `_ => false` 模拟前台锁拒绝）、`activationRetry`（默认 `Activate()`，harness 注入 no-op）。生产代码保持无参默认行为。
 
 ---
 
-## 9. 验收状态（本次 task-6）
+## 9. 验收状态（task-6 轮次，历史记录）
+
+> 本节数字是当轮快照（175 用例 / 10 张预览）；0.2.0 收口为 **403/403** 与 **12 张**，见本文 §11 与
+> `docs/安装与更新.md` §6.3。
 
 - `dotnet build src\Loom\Loom.csproj -p:UseSharedCompilation=false`：**0 error**（2 个 WFO0003 DPI manifest 警告，按约定忽略）。
-- 测试：`Loom.TestRunner` 反射 runner 全绿 **175/175 PASS**（当前仓内总数；含应用内更新 32 例，0 fail）。
+- 测试：`Loom.TestRunner` 反射 runner 全绿 **175/175 PASS**（当轮仓内总数；含应用内更新 32 例，0 fail）。
 - `loom-dsh.exe ui render --data-root D:\BS\Loom-DSH\.tmp-ui-tray`：**退出码 0**，生成 **10 张** PNG（popup / settings / settings-update / wizard / tray-menu × dark/light），无残留托盘进程；产物已核对并复制到 `design/ui/impl-preview/`。
 - 行为验证：`spike/tray-ui-harness` **32/32 checks PASS，退出码 0**（菜单先关后执行、可重复打开、busy 禁用、弹层失焦保护、菜单→状态面板端到端、前台锁/capture 兜底决策、图标对照图生成）。
 - 复审补丁（前台锁加固）：`TrayMenuWindow` 增加 `SetForegroundWindow` 尝试 + Diagnostics/WARN 落日志、未激活时 mouse-capture 外部点击关闭兜底、`ShouldDismissOnMouseCaptureLoss`/`IsPointInsideMenu` 决策函数；`dotnet build src\Loom\Loom.csproj -p:UseSharedCompilation=false` 仍 0 error，harness 由 20 → 32 checks 全 PASS。
@@ -264,11 +270,23 @@ InvalidOperationException: A TwoWay or OneWayToSource binding cannot work on the
 
 **修复**：
 1. Value="{Binding UpdateProgress, Mode=OneWay}"（只读展示型属性统一显式 Mode=OneWay）。
-2. App.OnStartup：初始化界面包 	ry/catch；ender 模式在 inally 里无条件 Shutdown()，渲染失败也会退出并返回非 0。
+2. App.OnStartup：初始化界面包 try/catch；render 模式在 finally 里无条件 Shutdown()，渲染失败也会退出并返回非 0。
 3. TrayHost.ShowSettingsCore/ShowWizardCore/ShowReportCore：窗口创建失败 → 清理半初始化状态 + 写日志 + 弹一次可读的错误提示，不再静默。
 4. AppServices.TryLogException 改用服务自身的 logger（LoomService.LogException）。此前它另开一个 FileLogger 追加同一文件，
    两个句柄各自维护偏移会互相覆盖 —— 本次真正的那行 ERROR 就被后续 INFO 覆盖成了半行，属于“有日志等于没日志”。
 5. ui render 增加 settings-update-{dark,light}.png（渲染「更新与兼容」页），把这类只在运行时爆炸的绑定问题纳入回归验证。
 
-**验证**：ui render --data-root <工作区内目录> → 退出码 **0**、**10 张** PNG（含 settings-update 深浅各一张，已逐张 ead_image 核对）；
+**验证**：ui render --data-root <工作区内目录> → 退出码 **0**、**10 张** PNG（含 settings-update 深浅各一张，已逐张 read_image 核对）；
 ui settings → 主窗口 Loom 设置 可见（MainWindowHandle != 0）；全量单测 **175/175 PASS**。
+
+## 11. 0.2.0（本地，未发布）界面相关变更
+
+- **`ui render` 失败返回非 0**：启动期初始界面失败会记 `RequestedExitCode = 1`；`render` 模式在 `finally` 里用
+  `Shutdown(exitCode)` 显式带退出码（失败为 1）。`Program.RunTray` 在 `Application.Run()` 返回 0 时用
+  `RequestedExitCode` 兜底，失败不再被吞成 0（此前 `BeginInvoke(Shutdown)` 无参时默认 0）。
+- **非交互会话不弹 MessageBox**：`DisplayPolicy.ShouldShowModal`（`Environment.UserInteractive && sessionId != 0`）
+  统一决定是否允许模态框；服务化启动、断开的会话、session 0 只写日志。UI 线程未处理异常不再静默全吞：
+  每次都按 ERROR 记录，连续 3 次才（在交互会话）提示一次，托盘继续存活。
+- 设置页新增「插件自动升级（策略 A）」「包级恢复（实验性）」两组卡片与「回滚」按钮（见 §2.2）；
+  通知去重改为最近 20 个 eventId（见 §4）；预览为 **12 张**，新增 `settings-compat-{dark,light}.png` 整页快照
+  （覆盖上述两组卡片，见 §5）；`ui render` 跳过升级清理/自动检查更新/队列与定时器，失败返回非 0。

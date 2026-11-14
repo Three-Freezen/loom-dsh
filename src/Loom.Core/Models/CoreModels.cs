@@ -144,7 +144,43 @@ public sealed class LoomConfig
     /// <summary>Compatibility policy: A = auto upgrade to compatible version (phase 2).</summary>
     public string AutoUpgradePolicy { get; set; } = "A";
 
+    /// <summary>
+    /// 策略 A 自动升级总开关。**默认关闭**（安全默认）：关闭时 Tick 绝不查询 registry、绝不执行安装；
+    /// 打开且 <see cref="AutoUpgradePolicy"/> = "A" 时才允许 Tick 在 DSH 完全退出后自动升级
+    /// “与目标 dshVersion 兼容”的插件（没有兼容版本时只提示人工，绝不自动授予风险豁免）。
+    /// </summary>
+    public bool AutoUpgradeEnabled { get; set; }
+
     public bool AllowMajorUpgrade { get; set; }
+
+    /// <summary>是否允许把 prerelease（nightly/next）候选纳入自动升级（仅在没有稳定兼容版本时才会选中）。</summary>
+    public bool AllowPrereleaseUpgrade { get; set; }
+
+    /// <summary>策略 A 的 registry 查询超时（秒，默认 60）。</summary>
+    public int UpgradeQueryTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>策略 A 的单包安装超时（秒，默认 900 = 15min，设计 §8.4）。</summary>
+    public int UpgradeInstallTimeoutSeconds { get; set; } = 900;
+
+    /// <summary>升级前必须确认 DSH 已完全退出（默认 true；false 时不注入进程探针）。</summary>
+    public bool RequireAppExitForUpgrade { get; set; } = true;
+
+    /// <summary>包级恢复（二期实验性）总开关。默认关闭：关闭时 CLI/UI 的包级恢复直接拒绝，不写 profile。</summary>
+    public bool PackageRestoreEnabled { get; set; }
+
+    /// <summary>
+    /// 包级恢复离线失败后是否允许**询问**用户联网重试（仍需逐次同意；默认 false = 只走离线）。
+    /// </summary>
+    public bool PackageRestoreAllowNetworkFallback { get; set; }
+
+    /// <summary>包级恢复的单次 install 超时（秒，默认 600）。</summary>
+    public int PackageRestoreInstallTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>包级恢复后首启就绪判定窗口（秒，默认 20，与 <see cref="HealthCheckSeconds"/> 默认一致）。</summary>
+    public int PackageRestoreReadyTimeoutSeconds { get; set; } = 20;
+
+    /// <summary><c>restore-backup\*</c> 回滚点保留份数（默认 5；清理只删最旧的，绝不删当前 op）。</summary>
+    public int KeepRollbackBackups { get; set; } = 5;
 
     public int KeepSnapshots { get; set; } = 5;
 
@@ -268,6 +304,12 @@ public sealed class LoomState
     public string? ToolVersion { get; set; }
     public string? LastNotifiedEventId { get; set; }
     public DateTimeOffset? LastNotifiedAt { get; set; }
+
+    /// <summary>
+    /// 最近通知过的 eventId（滚动窗口，最多 <see cref="Infrastructure.NotificationLedger.MaxRememberedEventIds"/> 个）。
+    /// 用于跨进程重启去重；旧版 state.json 只有 lastNotifiedEventId，加载时会自动并入本列表。
+    /// </summary>
+    public List<string> RecentNotifiedEventIds { get; set; } = new();
     public UpdatePhase Phase { get; set; } = UpdatePhase.Idle;
     public bool FirstRunCompleted { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -384,6 +426,18 @@ public sealed class LoomStatus
     public string? LastReportPath { get; set; }
     public bool FirstRun { get; set; }
     public List<ActivityItem> RecentActivity { get; set; } = new();
+
+    /// <summary>
+    /// 最近一个“可离线回滚”的包级操作 opId（restore-backup\&lt;opId&gt;\ 带回滚点且哈希校验通过）。
+    /// 为空表示当前没有可回滚的包级操作。**可选字段**：旧版 UI/JSON 消费方忽略即可。
+    /// </summary>
+    public string? RollbackOperationId { get; set; }
+
+    /// <summary>
+    /// 包级恢复当前是否可用（开关打开且已有快照）。**可选字段**，用于 UI 入口启用状态；
+    /// 真正的执行仍会再校验一次开关与前置条件。
+    /// </summary>
+    public bool PackageRestoreAvailable { get; set; }
 }
 
 public sealed class ActivityItem

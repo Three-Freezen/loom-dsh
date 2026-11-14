@@ -607,6 +607,10 @@ public sealed class RestoreService : IRestoreService
         AtomicFile.WriteAllText(path, json);
     }
 
+    /// <summary>
+    /// 原子复制：先完整写入同目录临时文件，再 rename 覆盖目标（P2-10）。
+    /// 中途失败时目标文件保持原样，不会出现半截文件。
+    /// </summary>
     private static void CopyAtomic(string source, string destination)
     {
         var bytes = File.ReadAllBytes(source);

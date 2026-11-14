@@ -37,6 +37,12 @@ public sealed class CliInvocation
     /// <summary>update: override the download destination directory.</summary>
     public string? UpdateDownloadDir { get; set; }
 
+    /// <summary>upgrade: 只处理指定插件包名（缺省 = 按检查结果批量处理不兼容项）。</summary>
+    public string? PackageName { get; set; }
+
+    /// <summary>upgrade: 允许把 prerelease 候选纳入决策（仍稳定版优先）。</summary>
+    public bool AllowPrerelease { get; set; }
+
     public string? DataRoot { get; set; }
     public string? InstallDir { get; set; }
     public string? DshHome { get; set; }
@@ -101,6 +107,16 @@ public static class CliParser
                 case "--apply":
                     invocation.UpdateApply = true;
                     continue;
+                case "--allow-prerelease":
+                    invocation.AllowPrerelease = true;
+                    continue;
+            }
+
+            if (arg is "--pkg" or "--package")
+            {
+                if (++index >= args.Length) return Error(invocation, "--pkg 缺少参数值");
+                invocation.PackageName = args[index];
+                continue;
             }
 
             if (arg is "--update-source")

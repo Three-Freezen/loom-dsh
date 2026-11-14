@@ -58,7 +58,8 @@ public sealed class DataRootResolution
         _ => "开发默认（%LOCALAPPDATA%\\Loom）",
     };
 
-    internal static bool PathEquals(string left, string right)
+    /// <summary>两个数据根是否指向同一目录（Windows 下忽略大小写与末尾分隔符）。</summary>
+    public static bool PathEquals(string left, string right)
     {
         if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return false;
         try

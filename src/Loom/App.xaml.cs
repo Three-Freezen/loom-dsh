@@ -1,9 +1,10 @@
 using System.Windows;
 using System.Windows.Threading;
 using Loom.Core.Abstractions;
+using Loom.Core.Cli;
+using Loom.Core.Infrastructure;
 using Loom.Core.Ipc;
 using Application = System.Windows.Application;
-using MessageBox = System.Windows.MessageBox;
 
 namespace Loom;
 
@@ -13,8 +14,16 @@ public partial class App : Application
     private readonly InstanceLock _instance;
     private readonly string? _initialUi;
     private readonly CancellationTokenSource _cts = new();
+    private readonly UiExceptionBudget _uiExceptionBudget = new();
     private TrayHost? _tray;
     private System.Threading.Timer? _timer;
+    private int _requestedExitCode;
+
+    /// <summary>
+    /// 启动期已经判定失败、但进程可能继续以托盘存活时记录的退出码（P2-1/P3-1）。
+    /// <see cref="Program.RunTray"/> 在 <see cref="Application.Run()"/> 返回 0 时用它。
+    /// </summary>
+    public int RequestedExitCode => Volatile.Read(ref _requestedExitCode);
 
     /// <summary>
     /// Required only so the XAML-generated <c>App.Main</c> compiles; the real entry point is
@@ -45,13 +54,18 @@ public partial class App : Application
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
+        // P3-R7：ui render 是离屏截图模式，不启动任何会删文件/联网/自动操作的后台副作用。
+        var isRender = string.Equals(_initialUi, "render", StringComparison.OrdinalIgnoreCase);
+
         _tray = new TrayHost(_services);
         _services.UiHandler = new UiRouter(this, _tray);
         _services.ExitRequested += (_, _) => Dispatcher.InvokeAsync(Shutdown);
-        _tray.Start();
-        _services.StartQueueServer();
-
-        _timer = new System.Threading.Timer(_ => RunTick(), null, 2500, 15000);
+        _tray.Start(suppressStartupSideEffects: isRender);
+        if (!isRender)
+        {
+            _services.StartQueueServer();
+            _timer = new System.Threading.Timer(_ => RunTick(), null, 2500, 15000);
+        }
 
         ThreadPool.RegisterWaitForSingleObject(
             _instance.ShowWaitHandle,
@@ -65,7 +79,6 @@ public partial class App : Application
 
         if (!string.IsNullOrEmpty(_initialUi))
         {
-            var isRender = string.Equals(_initialUi, "render", StringComparison.OrdinalIgnoreCase);
             try
             {
                 ShowTarget(_initialUi);
@@ -74,20 +87,25 @@ public partial class App : Application
             {
                 // A failing initial window must not keep a headless render/UI run alive forever.
                 _services.TryLogException(exception, "初始界面打开失败（" + _initialUi + "）");
+                // P2-1/P3-1：失败必须体现在退出码上（render 失败返回非 0；非 render 先记录、
+                // 进程继续以托盘存活，用户退出时把失败码带回调用方）。
+                Interlocked.Exchange(ref _requestedExitCode, ExitCodes.Failed);
                 if (!isRender)
                 {
-                    MessageBox.Show(
-                        "界面打开失败：\n" + exception.Message,
-                        "Loom for DSH",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
+                    // P2-6：非交互会话不弹模态框（只写日志），避免阻塞 UI 线程。
+                    UiInteraction.ShowWarning(
+                        "界面打开失败：\n" + exception.Message
+                        + "\n\n详细信息已写入日志（数据目录\\logs\\loom.log）。",
+                        "Loom for DSH");
                 }
             }
             finally
             {
                 if (isRender)
                 {
-                    Dispatcher.BeginInvoke(new Action(Shutdown));
+                    // 显式带退出码 Shutdown：Application.Run() 会把它作为进程退出码返回。
+                    var exitCode = RequestedExitCode == 0 ? ExitCodes.Success : RequestedExitCode;
+                    Dispatcher.BeginInvoke(new Action(() => Shutdown(exitCode)));
                 }
             }
         }
@@ -99,17 +117,22 @@ public partial class App : Application
 
     private void RunTick()
     {
-        try
+        // 定时器回调只负责投递：Tick 内部用 Interlocked 串行化并跳过重叠轮次，
+        // 这里不再同步等待，避免长时间占用线程池/UI 线程。
+        _ = Task.Run(async () =>
         {
-            _services.Loom.TickAsync(_cts.Token).GetAwaiter().GetResult();
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception exception)
-        {
-            _services.TryLogException(exception, "Scheduler tick failed");
-        }
+            try
+            {
+                await _services.Loom.TickAsync(_cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception exception)
+            {
+                _services.TryLogException(exception, "Scheduler tick failed");
+            }
+        });
     }
 
     public void ShowTarget(string target)
@@ -139,8 +162,20 @@ public partial class App : Application
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        _services.TryLogException(e.Exception, "UI thread exception");
+        // P2-6：不再静默全吞——每次都按 ERROR 记日志并计数；只有达到阈值时提示一次（仅交互会话）。
+        var count = _uiExceptionBudget.Count + 1;
+        _services.TryLogException(e.Exception, $"UI thread exception #{count}");
+        var shouldPrompt = _uiExceptionBudget.Record();
+        // 让托盘继续存活（否则单个界面异常就会结束整个进程）。
         e.Handled = true;
+
+        if (shouldPrompt && UiInteraction.CanShowModal)
+        {
+            Dispatcher.BeginInvoke(new Action(() => UiInteraction.ShowWarning(
+                $"界面层连续出现 {_uiExceptionBudget.Count} 次未处理异常，详细信息已写入日志"
+                + "（数据目录\\logs\\loom.log）。\n托盘仍会继续运行。",
+                "Loom for DSH")));
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)

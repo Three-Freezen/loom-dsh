@@ -9,10 +9,23 @@ public sealed class FileLogger : ILogger, IDisposable
 {
     private const long MaxBytes = 5 * 1024 * 1024;
     private const int MaxFiles = 3;
+
+    /// <summary>
+    /// 跨进程日志互斥量（P2-2 / P2-R2）：名字由数据根派生，不同数据根互不阻塞；同一数据根在
+    /// 同一会话内共用一把锁。跨会话仍由“打开即 EOF + FileMode.Append”兜底（宁可不丢日志）。
+    /// </summary>
+    public static string LogMutexName => LogMutexNameFor(null);
+
+    /// <summary>按数据根派生日志互斥量名（与 <see cref="OperationGate"/> 同一套哈希规则）。</summary>
+    public static string LogMutexNameFor(string? dataRoot) => ProcessNames.LogMutex(dataRoot);
+
+    /// <summary>等待日志互斥量的上限；超时后仍然写入（FileMode.Append 本身也会定位 EOF，宁可不丢日志）。</summary>
+    private static readonly TimeSpan LogMutexTimeout = TimeSpan.FromSeconds(5);
+
     private readonly object _gate = new();
     private readonly LoomPaths _paths;
     private readonly LogLevel _minimum;
-    private StreamWriter? _writer;
+    private readonly string _logMutexName;
     private long _written;
     private bool _disposed;
 
@@ -20,8 +33,9 @@ public sealed class FileLogger : ILogger, IDisposable
     {
         _paths = paths;
         _minimum = minimum;
+        _logMutexName = LogMutexNameFor(paths.DataRoot);
         Directory.CreateDirectory(paths.LogsDir);
-        Open();
+        _written = TryGetLength();
     }
 
     public string LogFilePath => _paths.LogFilePath;
@@ -51,11 +65,9 @@ public sealed class FileLogger : ILogger, IDisposable
             if (_disposed) return;
             try
             {
-                _writer ??= Open();
-                _writer.WriteLine(line);
-                _writer.Flush();
-                _written += Encoding.UTF8.GetByteCount(line) + System.Environment.NewLine.Length;
-                if (_written > MaxBytes) Rotate();
+                using var logMutex = TryAcquireLogMutex(_logMutexName);
+                AppendLine(line);
+                if (_written > MaxBytes) RotateLocked();
             }
             catch
             {
@@ -64,20 +76,101 @@ public sealed class FileLogger : ILogger, IDisposable
         }
     }
 
-    private StreamWriter Open()
+    /// <summary>
+    /// 每次写入都 open/close：<see cref="FileMode.Append"/> 在打开时定位到 EOF，因此不存在“陈旧偏移”；
+    /// 关闭句柄也避免长期占用文件导致别的进程轮转失败。
+    /// </summary>
+    private void AppendLine(string line)
     {
-        var stream = new FileStream(_paths.LogFilePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-        _writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
-        try { _written = stream.Length; } catch { _written = 0; }
-        return _writer;
+        using var stream = new FileStream(
+            _paths.LogFilePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+        using var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+        writer.WriteLine(line);
+        writer.Flush();
+        _written = stream.Length;
     }
 
-    private void Rotate()
+    private long TryGetLength()
     {
         try
         {
-            _writer?.Dispose();
-            _writer = null;
+            return File.Exists(_paths.LogFilePath) ? new FileInfo(_paths.LogFilePath).Length : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>尝试获取跨进程日志互斥量；超时返回 null（调用方仍然写入，绝不因为抢锁失败丢日志）。</summary>
+    private static LogMutexLease? TryAcquireLogMutex(string mutexName)
+    {
+        Mutex mutex;
+        try
+        {
+            mutex = new Mutex(initiallyOwned: false, mutexName);
+        }
+        catch
+        {
+            return null;
+        }
+
+        try
+        {
+            bool acquired;
+            try
+            {
+                acquired = mutex.WaitOne(LogMutexTimeout);
+            }
+            catch (AbandonedMutexException)
+            {
+                // 上一个持锁进程崩溃：本线程接管所有权，之后仍可正常 ReleaseMutex。
+                acquired = true;
+            }
+
+            if (acquired) return new LogMutexLease(mutex);
+        }
+        catch
+        {
+            // 命名互斥量不可用（受限会话等）：退化为无锁追加。
+        }
+
+        mutex.Dispose();
+        return null;
+    }
+
+    /// <summary>日志互斥量的释放句柄：先 ReleaseMutex 再 Dispose（两者都在同一线程上完成）。</summary>
+    private sealed class LogMutexLease : IDisposable
+    {
+        private readonly Mutex _mutex;
+        private bool _released;
+
+        public LogMutexLease(Mutex mutex) => _mutex = mutex;
+
+        public void Dispose()
+        {
+            if (_released) return;
+            _released = true;
+            try
+            {
+                _mutex.ReleaseMutex();
+            }
+            catch (ApplicationException)
+            {
+                // 理论上不会发生（在同一线程释放）；保留兜底。
+            }
+            finally
+            {
+                _mutex.Dispose();
+            }
+        }
+    }
+
+    /// <summary>轮转（调用方已持锁）：log → log.1 → log.2 → log.3，超出的最旧文件丢弃。</summary>
+    private void RotateLocked()
+    {
+        try
+        {
             for (var index = MaxFiles - 1; index >= 1; index--)
             {
                 var older = $"{_paths.LogFilePath}.{index}";
@@ -92,24 +185,24 @@ public sealed class FileLogger : ILogger, IDisposable
             {
                 File.Move(_paths.LogFilePath, _paths.LogFilePath + ".1", overwrite: true);
             }
+
+            // 与旧实现一致：轮转后立刻有一个空的新日志文件，避免“日志文件消失”被误判为故障。
+            using (File.Create(_paths.LogFilePath))
+            {
+            }
+
+            _written = 0;
         }
         catch
         {
-            // ignore rotation failures
-        }
-        finally
-        {
-            _written = 0;
-            try { _writer = Open(); } catch { _writer = null; }
+            // 另一个进程/杀软仍占用文件：本次跳过，写到阈值一半后再重试，避免每条日志都尝试轮转。
+            _written = MaxBytes / 2;
         }
     }
 
     public void Flush()
     {
-        lock (_gate)
-        {
-            try { _writer?.Flush(); } catch { }
-        }
+        // 每次写入都已立即 Flush 并关闭句柄，无需额外动作（保留接口语义）。
     }
 
     public void Dispose()
@@ -117,8 +210,6 @@ public sealed class FileLogger : ILogger, IDisposable
         lock (_gate)
         {
             _disposed = true;
-            try { _writer?.Dispose(); } catch { }
-            _writer = null;
         }
     }
 }

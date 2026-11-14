@@ -193,49 +193,65 @@ public sealed class SnapshotService : ISnapshotService
 
         var snapshotDir = paths.SnapshotDir(id);
         var profileDir = Path.Combine(snapshotDir, "profile");
-        Directory.CreateDirectory(profileDir);
-
-        // 1. Copy the profile configuration files byte-for-byte.
-        foreach (var fileName in CoreProfileFiles)
+        var snapshotDirExistedBefore = Directory.Exists(snapshotDir);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var source = Path.Combine(manifest.ProfileDir, fileName);
-            if (!File.Exists(source)) continue;
-            var destination = Path.Combine(profileDir, fileName);
-            File.Copy(source, destination, overwrite: true);
-            RememberFile(manifest, fileName);
+            Directory.CreateDirectory(profileDir);
+
+            // 1. Copy the profile configuration files byte-for-byte.
+            foreach (var fileName in CoreProfileFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var source = Path.Combine(manifest.ProfileDir, fileName);
+                if (!File.Exists(source)) continue;
+                var destination = Path.Combine(profileDir, fileName);
+                File.Copy(source, destination, overwrite: true);
+                RememberFile(manifest, fileName);
+            }
+
+            // 2. Optional full archive: copy the node_modules tree, bounded by config + disk space.
+            if (string.Equals(manifest.PackageArchive?.Kind, "node-modules-tree", StringComparison.OrdinalIgnoreCase))
+            {
+                manifest.PackageArchive = CopyPackageArchive(manifest, snapshotDir, config, cancellationToken);
+            }
+
+            // 3. Write snapshot.json (UTF-8, no BOM) and hash it.
+            var manifestPath = Path.Combine(snapshotDir, "snapshot.json");
+            AtomicFile.WriteJson(manifestPath, manifest);
+            var sha256 = Hashing.Sha256Hex(manifestPath);
+
+            var reference = new SnapshotRef
+            {
+                Id = id,
+                Path = snapshotDir,
+                TakenAt = manifest.TakenAt == default ? DateTimeOffset.Now : manifest.TakenAt,
+                AppVersion = manifest.AppVersion,
+                DshVersion = manifest.DshVersion,
+                Sha256 = sha256,
+                Trigger = manifest.Trigger,
+                SizeBytes = FileSystemUtil.DirectorySize(snapshotDir),
+                Frozen = manifest.Trigger == SnapshotTrigger.PreUpdate,
+                PluginCount = manifest.Plugins.Count,
+                BundleCount = manifest.Profile.Bundles.Count,
+            };
+
+            _logger.Log(
+                LogLevel.Info,
+                $"Snapshot written: {id} ({reference.SizeBytes} bytes, archive={manifest.PackageArchive?.Kind})");
+            return Task.FromResult(reference);
         }
-
-        // 2. Optional full archive: copy the node_modules tree, bounded by config + disk space.
-        if (string.Equals(manifest.PackageArchive?.Kind, "node-modules-tree", StringComparison.OrdinalIgnoreCase))
+        catch (Exception exception)
         {
-            manifest.PackageArchive = CopyPackageArchive(manifest, snapshotDir, config, cancellationToken);
+            // 中途失败（IO/取消）时清理半成品目录，避免留下没有 snapshot.json 的垃圾目录，
+            // 也避免后续 retention 把它误判为 corrupt 快照。
+            if (!snapshotDirExistedBefore)
+            {
+                FileSystemUtil.DeleteDirectoryBestEffort(snapshotDir);
+                _logger.Log(LogLevel.Warn, $"Snapshot write failed; removed partial directory {snapshotDir}: {exception.Message}");
+            }
+
+            throw;
         }
-
-        // 3. Write snapshot.json (UTF-8, no BOM) and hash it.
-        var manifestPath = Path.Combine(snapshotDir, "snapshot.json");
-        AtomicFile.WriteJson(manifestPath, manifest);
-        var sha256 = Hashing.Sha256Hex(manifestPath);
-
-        var reference = new SnapshotRef
-        {
-            Id = id,
-            Path = snapshotDir,
-            TakenAt = manifest.TakenAt == default ? DateTimeOffset.Now : manifest.TakenAt,
-            AppVersion = manifest.AppVersion,
-            DshVersion = manifest.DshVersion,
-            Sha256 = sha256,
-            Trigger = manifest.Trigger,
-            SizeBytes = FileSystemUtil.DirectorySize(snapshotDir),
-            Frozen = manifest.Trigger == SnapshotTrigger.PreUpdate,
-            PluginCount = manifest.Plugins.Count,
-            BundleCount = manifest.Profile.Bundles.Count,
-        };
-
-        _logger.Log(
-            LogLevel.Info,
-            $"Snapshot written: {id} ({reference.SizeBytes} bytes, archive={manifest.PackageArchive?.Kind})");
-        return Task.FromResult(reference);
     }
 
     public Task<SnapshotManifest?> LoadAsync(SnapshotRef reference, CancellationToken cancellationToken = default)
@@ -348,9 +364,11 @@ public sealed class SnapshotService : ISnapshotService
         }
 
         // At least one snapshot per DSH version (the newest of each version).
+        var versionKeep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in newestFirst.GroupBy(entry => entry.DshVersion, StringComparer.OrdinalIgnoreCase))
         {
             keep.Add(group.First().Id);
+            versionKeep.Add(group.First().Id);
         }
 
         foreach (var entry in entries)
@@ -382,13 +400,14 @@ public sealed class SnapshotService : ISnapshotService
         }
 
         // Then the hard quota: evict the oldest non-frozen snapshots until under MaxSnapshotBytes.
+        // 每个 dshVersion 的最新一份必须保留（版本回退/对比需要），不参与 quota 淘汰。
         if (totalBytes > config.MaxSnapshotBytes)
         {
             foreach (var entry in newestFirst.AsEnumerable().Reverse())
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (totalBytes <= config.MaxSnapshotBytes) break;
-                if (entry.Frozen || protectedIds.Contains(entry.Id) || deleted.Contains(entry.Id)) continue;
+                if (entry.Frozen || protectedIds.Contains(entry.Id) || versionKeep.Contains(entry.Id) || deleted.Contains(entry.Id)) continue;
                 if (TryDeleteDirectory(entry.Directory))
                 {
                     _logger.Log(LogLevel.Info, $"Retention quota removed snapshot {entry.Id}");

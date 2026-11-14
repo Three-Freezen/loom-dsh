@@ -399,28 +399,144 @@
                                             </StackPanel>
                                         </RadioButton>
                                     </StackPanel>
-                                    <TextBlock Text="首版（范围 A）不会自动安装插件；兼容结果写入报告，需人工确认的项会出现在托盘状态与通知中。"
-                                               Style="{StaticResource RowHint}" Margin="0,14,0,0" />
+                                    <TextBlock Text="兼容结果写入报告，需人工确认的项会出现在托盘状态与通知中；自动安装只在“策略 A 自动升级”打开后生效。"
+                                               Style="{StaticResource RowHint}" Margin="0,14,0,0" TextWrapping="Wrap" MaxWidth="560"
+                                               HorizontalAlignment="Left" />
                                 </StackPanel>
                             </Border>
 
-                            <Border Style="{StaticResource PaneCard}">
+                            <!-- 二期：策略 A 自动升级（插件） -->
+                            <Border Style="{StaticResource PaneCard}" Margin="0,0,0,14">
                                 <StackPanel>
-                                    <TextBlock Text="更新后自动恢复" Style="{StaticResource SectionTitleText}" />
+                                    <TextBlock Text="插件自动升级（策略 A）" Style="{StaticResource SectionTitleText}" />
+                                    <TextBlock Text="只在 DSH 完全退出后执行：查询与目标运行时兼容的版本并安装（--save-exact），写前先备份到 restore-backup；没有兼容版本时只提示，不自动豁免风险。"
+                                               Style="{StaticResource RowHint}" Margin="0,6,0,0" TextWrapping="Wrap" MaxWidth="560"
+                                               HorizontalAlignment="Left" />
+
                                     <Grid Margin="0,14,0,0">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <StackPanel>
-                                            <TextBlock Text="更新后自动文件级还原" Style="{StaticResource LabelText}" />
-                                            <TextBlock Text="重启后补齐插件启用项与配置，必要时重启一次生效。"
-                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" />
+                                            <TextBlock Text="策略 A 自动升级" Style="{StaticResource LabelText}" />
+                                            <TextBlock Text="{Binding AutoUpgradeHintText, Mode=OneWay}"
+                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" TextWrapping="Wrap"
+                                                       MaxWidth="540" HorizontalAlignment="Left" />
                                         </StackPanel>
                                         <ToggleButton Grid.Column="1" Style="{StaticResource SwitchToggle}"
                                                       VerticalAlignment="Center"
-                                                      IsChecked="{Binding AutoRestoreAfterRecovery, Mode=TwoWay}" />
+                                                      IsChecked="{Binding AutoUpgradeEnabled, Mode=TwoWay}" />
                                     </Grid>
+
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="允许 major 升级" Style="{StaticResource LabelText}" />
+                                            <TextBlock Text="允许跨大版本升级；可能涉及插件数据格式迁移，建议先快照。"
+                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" TextWrapping="Wrap"
+                                                       MaxWidth="540" HorizontalAlignment="Left" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1" Style="{StaticResource SwitchToggle}"
+                                                      VerticalAlignment="Center"
+                                                      IsChecked="{Binding AllowMajorUpgrade, Mode=TwoWay}" />
+                                    </Grid>
+
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="允许预发布版本" Style="{StaticResource LabelText}" />
+                                            <TextBlock Text="允许 nightly / next 等预发布候选（仍稳定版优先；只有没有稳定兼容版本时才会选中）。"
+                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" TextWrapping="Wrap"
+                                                       MaxWidth="540" HorizontalAlignment="Left" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1" Style="{StaticResource SwitchToggle}"
+                                                      VerticalAlignment="Center"
+                                                      IsChecked="{Binding AllowPrereleaseUpgrade, Mode=TwoWay}" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- 更新后自动恢复只保留“备份与还原”页的一处（P3：同一开关曾被重复绑定两处）。
+                                 这里不再放第二张卡片，避免同一配置项两个开关、说明文案还互相矛盾。 -->
+
+                            <!-- 二期：包级恢复（package.json + pnpm-lock.yaml + 离线 install） -->
+                            <Border Style="{StaticResource PaneCard}" Margin="0,14,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="包级恢复（实验性）" Style="{StaticResource SectionTitleText}" />
+                                    <!-- P3：属性值必须是单行。XAML 会原样保留属性值内的换行+缩进，
+                                         一旦为了排版折行，渲染后句子中间就会出现一大段空白。 -->
+                                    <TextBlock Text="文件级还原救不回 node_modules：包级恢复会先备份两个核心文件，再按快照写回 package.json / pnpm-lock.yaml，用 dsh plugin install --offline --frozen-lockfile 重建依赖树并校验；失败只回滚本次操作。"
+                                               Style="{StaticResource RowHint}" Margin="0,6,0,0" TextWrapping="Wrap" MaxWidth="560"
+                                               HorizontalAlignment="Left" />
+
+                                    <Grid Margin="0,14,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="启用包级恢复" Style="{StaticResource LabelText}" />
+                                            <TextBlock Text="{Binding PackageRestoreHintText, Mode=OneWay}"
+                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" TextWrapping="Wrap"
+                                                       MaxWidth="540" HorizontalAlignment="Left" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1" Style="{StaticResource SwitchToggle}"
+                                                      VerticalAlignment="Center"
+                                                      IsChecked="{Binding PackageRestoreEnabled, Mode=TwoWay}" />
+                                    </Grid>
+
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="允许联网回退" Style="{StaticResource LabelText}" />
+                                            <TextBlock Text="离线安装缺缓存时允许“询问”是否联网重试；仍需每次确认，默认只走离线。"
+                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" TextWrapping="Wrap"
+                                                       MaxWidth="540" HorizontalAlignment="Left" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1" Style="{StaticResource SwitchToggle}"
+                                                      VerticalAlignment="Center"
+                                                      IsChecked="{Binding PackageRestoreAllowNetworkFallback, Mode=TwoWay}" />
+                                    </Grid>
+
+                                    <Border Style="{StaticResource Divider}" Margin="0,14,0,12" />
+
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="回滚上一次包级操作" Style="{StaticResource LabelText}" />
+                                            <TextBlock Text="{Binding RollbackHintText, Mode=OneWay}"
+                                                       Style="{StaticResource RowHint}" Margin="0,3,0,0" TextWrapping="Wrap"
+                                                       MaxWidth="540" HorizontalAlignment="Left" />
+                                        </StackPanel>
+                                        <Button Grid.Column="1" Command="{Binding RollbackPackageCommand}"
+                                                IsEnabled="{Binding CanRollbackPackage, Mode=OneWay}"
+                                                Style="{StaticResource SecondaryButton}" Height="30" Padding="12,0"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="回滚" FontSize="11.5" />
+                                        </Button>
+                                    </Grid>
+
+                                    <TextBlock Text="{Binding RollbackStatusText, Mode=OneWay}"
+                                               Foreground="{DynamicResource DangerBrush}" FontSize="11.5" Margin="0,8,0,0"
+                                               TextWrapping="Wrap"
+                                               Visibility="{Binding HasRollbackStatus, Converter={StaticResource BoolToVis}}" />
+
+                                    <TextBlock Text="需要 DSH 完全退出；Loom 不会结束进程、不会联网重试、不会写安装目录或 app.asar。"
+                                               Style="{StaticResource RowHint}" Margin="0,10,0,0" TextWrapping="Wrap" MaxWidth="560"
+                                               HorizontalAlignment="Left" />
                                 </StackPanel>
                             </Border>
                         </StackPanel>
@@ -627,7 +743,7 @@
                 </ScrollViewer>
 
                 <!-- 底部操作条 -->
-                <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="22,12">
+                <Border x:Name="FooterBar" Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="22,12">
                     <Grid>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBlock Text="{Binding ErrorText}" Foreground="{DynamicResource DangerBrush}" FontSize="11.5"
